@@ -52,12 +52,14 @@ class InternalHttpClient(object):
             host,
             login_url_path=None,
             max_retries=DEFAULT_MAX_RETRIES,
-            enable_auth_recovery=True):
+            enable_auth_recovery=True,
+            timeout=None):
         # maintained on login/logout
         self._host = host
         self._login_url_path = login_url_path or LOGIN_PATH
         self._max_retries = max_retries
         self._enable_auth_recovery = enable_auth_recovery
+        self._timeout = timeout
         self.username = None
         self.password = None
         self.access_token = None
@@ -186,7 +188,9 @@ class InternalHttpClient(object):
         #     connection.send(url, data, method=http_method, headers=BASE_HEADERS)
         method = method.upper()
 
-        timeout = 60 if method == "POST" else 30
+        timeout = self._timeout
+        if timeout is None:
+            timeout = 60 if method == "POST" else 30
         conn = http.client.HTTPSConnection(self._host, timeout=timeout, context=ssl._create_unverified_context())
 
         conn.request(method, url_path, data, headers)

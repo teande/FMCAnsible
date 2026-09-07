@@ -152,7 +152,8 @@ class HttpApi(HttpApiBase):
                 self._http_client = InternalHttpClient(
                     host,
                     TOKEN_PATH_TEMPLATE,
-                    enable_auth_recovery=not self.get_option('cdfmc')
+                    enable_auth_recovery=not self.get_option('cdfmc'),
+                    timeout=self.connection.get_option('persistent_command_timeout')
                 )
             except Exception:
                 self._use_internal_client = False

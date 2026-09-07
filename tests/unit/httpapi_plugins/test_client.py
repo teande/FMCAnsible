@@ -32,6 +32,20 @@ class FakeHttpResponse(object):
 
 
 class TestInternalHttpClient(unittest.TestCase):
+    @mock.patch(
+        'ansible_collections.cisco.fmcansible.plugins.httpapi.client.http.client.HTTPSConnection'
+    )
+    def test_send_request_uses_configured_timeout(self, connection_mock):
+        client = InternalHttpClient('fmc.example.com', timeout=180)
+
+        client._send_request('/api/test')
+
+        connection_mock.assert_called_once_with(
+            'fmc.example.com',
+            timeout=180,
+            context=mock.ANY
+        )
+
     def test_send_refresh_token_uses_raw_response_status_and_headers(self):
         client = InternalHttpClient('fmc.example.com')
         client.access_token = 'OLD_ACCESS'
