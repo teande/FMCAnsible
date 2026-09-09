@@ -1,0 +1,40 @@
+---
+- name: Get rules from stale file policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFileRuleModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_file_policy.id }}"
+    register_as: stale_file_rules
+
+- name: Delete rules from stale file policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFileRuleModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_file_policy.id }}"
+      objectId: "{{ stale_file_rule.id }}"
+  loop: "{{ stale_file_rules | default([]) }}"
+  loop_control:
+    loop_var: stale_file_rule
+    label: "{{ stale_file_rule.name | default(stale_file_rule.id) }}"
+
+- name: Re-read rules after file policy rule cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFileRuleModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_file_policy.id }}"
+    register_as: stale_file_rules_after_cleanup
+
+- name: Assert file policy rules were removed
+  ansible.builtin.assert:
+    that:
+      - (stale_file_rules_after_cleanup | default([])) | length == 0
+
+- name: Delete stale file policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFilePolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_file_policy.id }}"

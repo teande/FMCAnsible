@@ -1,0 +1,95 @@
+---
+- name: Select route-based S2S device
+  ansible.builtin.set_fact:
+    live_route_device_matches: >-
+      {{ (live_route_devices | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', route_endpoint.device_name)
+         | list }}
+
+- name: Require one route-based S2S device
+  ansible.builtin.assert:
+    that:
+      - live_route_device_matches | length == 1
+    fail_msg: >-
+      Expected one managed device named {{ route_endpoint.device_name }},
+      found {{ live_route_device_matches | length }}.
+
+- name: Get physical interfaces for route-based S2S device
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ live_route_device_matches[0].id }}"
+    register_as: live_route_physical_interfaces
+
+- name: Select route-based S2S source interface
+  ansible.builtin.set_fact:
+    live_route_interface_matches: >-
+      {{ (((live_route_physical_interfaces | default([]))
+           | selectattr('name', 'defined')
+           | selectattr('name', 'equalto',
+                        route_endpoint.source_interface_name)
+           | list)
+          + ((live_route_physical_interfaces | default([]))
+             | selectattr('ifname', 'defined')
+             | selectattr('ifname', 'equalto',
+                          route_endpoint.source_interface_name)
+             | list))
+         | unique(attribute='id')
+         | list }}
+
+- name: Require one route-based S2S source interface
+  ansible.builtin.assert:
+    that:
+      - live_route_interface_matches | length == 1
+    fail_msg: >-
+      Expected one physical interface named
+      {{ route_endpoint.source_interface_name }} on
+      {{ route_endpoint.device_name }}, found
+      {{ live_route_interface_matches | length }}.
+
+- name: Read route-based S2S source interface
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ live_route_device_matches[0].id }}"
+      objectId: "{{ live_route_interface_matches[0].id }}"
+    register_as: live_route_source_interface
+
+- name: Require an enabled named routed source interface
+  ansible.builtin.assert:
+    that:
+      - live_route_source_interface.enabled | default(false) | bool
+      - live_route_source_interface.ifname | default('') | length > 0
+      - live_route_source_interface.mode | default('NONE') == 'NONE'
+    fail_msg: >-
+      {{ route_endpoint.device_name }} needs an enabled, named, routed
+      source interface for route-based S2S testing.
+
+- name: Store resolved route-based S2S endpoint
+  ansible.builtin.set_fact:
+    live_route_resolved_endpoints: >-
+      {{ live_route_resolved_endpoints
+         + [route_endpoint
+            | combine({
+                'device': {
+                  'id': live_route_device_matches[0].id,
+                  'name': live_route_device_matches[0].name,
+                  'type': live_route_device_matches[0].type
+                            | default('Device')
+                },
+                'source_interface': {
+                  'id': live_route_source_interface.id,
+                  'name': live_route_source_interface.name,
+                  'type': live_route_source_interface.type
+                            | default('PhysicalInterface')
+                },
+                'source_interface_nameif': {
+                  'id': live_route_source_interface.id,
+                  'name': live_route_source_interface.ifname,
+                  'type': live_route_source_interface.type
+                            | default('PhysicalInterface')
+                }
+              })] }}

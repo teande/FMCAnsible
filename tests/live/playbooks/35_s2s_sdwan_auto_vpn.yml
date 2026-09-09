@@ -1,0 +1,561 @@
+---
+- name: Validate SD-WAN AUTO_VPN with generated spoke SVTI
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled SD-WAN S2S test
+      ansible.builtin.debug:
+        msg: "SD-WAN AUTO_VPN test is disabled."
+      when: not fmcansible_run_vpn_tests | bool
+
+    - name: Run SD-WAN AUTO_VPN lifecycle test
+      when: fmcansible_run_vpn_tests | bool
+      block:
+        - name: Validate SD-WAN S2S inputs
+          ansible.builtin.assert:
+            that:
+              - fmcansible_s2s_sdwan_hub.device_name | length > 0
+              - fmcansible_s2s_sdwan_spoke.device_name | length > 0
+              - >-
+                fmcansible_s2s_sdwan_hub.device_name
+                != fmcansible_s2s_sdwan_spoke.device_name
+              - fmcansible_s2s_sdwan_hub.tunnel_type == 'DYNAMIC'
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_sdwan_domains
+
+        - name: Initialize SD-WAN S2S facts
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_sdwan_domains[fmcansible_domain_index].uuid }}
+            live_route_resolved_endpoints: []
+            live_route_active_endpoints: []
+            live_route_security_zone: {}
+            live_sdwan_created_address_pool: {}
+            live_sdwan_spoke_vti_ids_before: []
+
+        - name: Get managed devices once
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_devices
+
+        - name: Resolve SD-WAN hub and spoke source interfaces
+          ansible.builtin.include_tasks: ../tasks/resolve_s2s_route_endpoint.yml
+          loop:
+            - "{{ fmcansible_s2s_sdwan_hub }}"
+            - "{{ fmcansible_s2s_sdwan_spoke }}"
+          loop_control:
+            loop_var: route_endpoint
+            label: "{{ route_endpoint.device_name }}"
+
+        - name: Store resolved SD-WAN hub and spoke
+          ansible.builtin.set_fact:
+            live_sdwan_hub: >-
+              {{ live_route_resolved_endpoints
+                 | selectattr('peer_type', 'equalto', 'HUB')
+                 | first }}
+            live_sdwan_spoke: >-
+              {{ live_route_resolved_endpoints
+                 | selectattr('peer_type', 'equalto', 'SPOKE')
+                 | first }}
+
+        - name: Get spoke VTIs before SD-WAN creation
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDVTIInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ live_sdwan_spoke.device.id }}"
+            query_params:
+              expanded: true
+            register_as: live_sdwan_spoke_vtis_before
+
+        - name: Store existing spoke VTI IDs
+          ansible.builtin.set_fact:
+            live_sdwan_spoke_vti_ids_before: >-
+              {{ live_sdwan_spoke_vtis_before
+                 | default([])
+                 | map(attribute='id')
+                 | list }}
+
+        - name: Create, deploy, validate, and remove SD-WAN S2S
+          block:
+            - name: Create spoke tunnel IPv4 address pool
+              cisco.fmcansible.fmc_configuration:
+                operation: createIPv4AddressPool
+                data:
+                  name: "{{ fmcansible_s2s_sdwan_pool_name }}"
+                  type: IPv4AddressPool
+                  description: "{{ fmcansible_live_prefix }}"
+                  ipAddressRange: "{{ fmcansible_s2s_sdwan_pool_range }}"
+                  mask: "{{ fmcansible_s2s_sdwan_pool_mask }}"
+                  overridable: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_sdwan_address_pool_result
+
+            - name: Store created spoke tunnel IPv4 address pool
+              ansible.builtin.set_fact:
+                live_sdwan_created_address_pool: >-
+                  {{ live_sdwan_address_pool_result }}
+
+            - name: Read spoke tunnel IPv4 address pool
+              cisco.fmcansible.fmc_configuration:
+                operation: getIPv4AddressPool
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_sdwan_created_address_pool.id }}"
+                register_as: live_sdwan_address_pool_get
+
+            - name: Assert spoke tunnel address pool persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_sdwan_address_pool_get.id
+                    == live_sdwan_created_address_pool.id
+                  - >-
+                    live_sdwan_address_pool_get.name
+                    == fmcansible_s2s_sdwan_pool_name
+                  - >-
+                    live_sdwan_address_pool_get.ipAddressRange
+                    == fmcansible_s2s_sdwan_pool_range
+                  - >-
+                    live_sdwan_address_pool_get.mask
+                    == fmcansible_s2s_sdwan_pool_mask
+
+            - name: Create spoke SVTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: createMultipleSecurityZoneObject
+                data:
+                  - name: "{{ fmcansible_s2s_sdwan_zone_name }}"
+                    type: SecurityZone
+                    interfaceMode: ROUTED
+                    interfaces: []
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                query_params:
+                  bulk: true
+                register_as: live_sdwan_security_zones
+
+            - name: Store spoke SVTI security zone
+              ansible.builtin.set_fact:
+                live_route_security_zone: "{{ live_sdwan_security_zones[0] }}"
+
+            - name: Read spoke SVTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: getSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+                register_as: live_sdwan_security_zone_get
+
+            - name: Assert spoke SVTI security zone persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_sdwan_security_zone_get.id
+                    == live_route_security_zone.id
+                  - >-
+                    live_sdwan_security_zone_get.name
+                    == fmcansible_s2s_sdwan_zone_name
+
+            - name: Create and verify the SD-WAN hub DVTI
+              ansible.builtin.include_tasks: >-
+                ../tasks/create_s2s_route_interfaces.yml
+              loop:
+                - "{{ live_sdwan_hub }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+
+            - name: Store active SD-WAN hub
+              ansible.builtin.set_fact:
+                live_sdwan_active_hub: "{{ live_route_active_endpoints[0] }}"
+
+            - name: Create SD-WAN AUTO_VPN topology
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDS2SVpnModel
+                data:
+                  name: "{{ fmcansible_s2s_sdwan_vpn_name }}"
+                  type: FTDS2SVpn
+                  description: "{{ fmcansible_live_prefix }}"
+                  topologyType: AUTO_VPN
+                  routeBased: true
+                  ikeV1Enabled: false
+                  ikeV2Enabled: true
+                  enableEcmpAtHub: false
+                  enableEcmpAtSpoke: false
+                  autoVpnSettings:
+                    spokeSvtiSecurityZone:
+                      id: "{{ live_route_security_zone.id }}"
+                      name: "{{ live_route_security_zone.name }}"
+                      type: SecurityZone
+                    routeSettings:
+                      enableBgp: false
+                      enableMultiPath: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_sdwan_vpn
+
+            - name: Read SD-WAN AUTO_VPN topology
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDS2SVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_sdwan_vpn.id }}"
+                register_as: live_sdwan_vpn_get
+
+            - name: Assert SD-WAN AUTO_VPN topology persisted
+              ansible.builtin.assert:
+                that:
+                  - live_sdwan_vpn_get.id == live_sdwan_vpn.id
+                  - live_sdwan_vpn_get.name == fmcansible_s2s_sdwan_vpn_name
+                  - live_sdwan_vpn_get.topologyType == 'AUTO_VPN'
+                  - live_sdwan_vpn_get.routeBased | bool
+                  - >-
+                    live_sdwan_vpn_get.autoVpnSettings
+                    .spokeSvtiSecurityZone.id == live_route_security_zone.id
+
+            - name: Read default SD-WAN IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                query_params:
+                  expanded: true
+                register_as: live_sdwan_ipsec_settings
+
+            - name: Require one SD-WAN IPsec settings object
+              ansible.builtin.assert:
+                that:
+                  - live_sdwan_ipsec_settings | length == 1
+
+            - name: Disable reverse-route injection for answer-only hub
+              cisco.fmcansible.fmc_configuration:
+                operation: updateVpnIPSecSettings
+                data:
+                  id: "{{ live_sdwan_ipsec_settings[0].id }}"
+                  type: IPSecSettings
+                  cryptoMapType: >-
+                    {{ live_sdwan_ipsec_settings[0].cryptoMapType }}
+                  ikeV2Mode: "{{ live_sdwan_ipsec_settings[0].ikeV2Mode }}"
+                  enableSaStrengthEnforcement: >-
+                    {{ live_sdwan_ipsec_settings[0]
+                       .enableSaStrengthEnforcement | default(false) }}
+                  enableRRI: false
+                  lifetimeSeconds: >-
+                    {{ live_sdwan_ipsec_settings[0].lifetimeSeconds }}
+                  lifetimeKilobytes: >-
+                    {{ live_sdwan_ipsec_settings[0].lifetimeKilobytes }}
+                  perfectForwardSecrecy: >-
+                    {{ live_sdwan_ipsec_settings[0].perfectForwardSecrecy }}
+                  validateIncomingIcmpErrorMessage: >-
+                    {{ live_sdwan_ipsec_settings[0]
+                       .validateIncomingIcmpErrorMessage | default(false) }}
+                  doNotFragmentPolicy: >-
+                    {{ live_sdwan_ipsec_settings[0].doNotFragmentPolicy }}
+                  tfcPackets: "{{ live_sdwan_ipsec_settings[0].tfcPackets }}"
+                  ikeV2IpsecProposal: >-
+                    {{ live_sdwan_ipsec_settings[0].ikeV2IpsecProposal }}
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                  objectId: "{{ live_sdwan_ipsec_settings[0].id }}"
+
+            - name: Read updated SD-WAN IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                  objectId: "{{ live_sdwan_ipsec_settings[0].id }}"
+                register_as: live_sdwan_ipsec_settings_get
+
+            - name: Assert reverse-route injection is disabled
+              ansible.builtin.assert:
+                that:
+                  - not live_sdwan_ipsec_settings_get.enableRRI | bool
+
+            - name: Create SD-WAN hub endpoint
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnEndpoint
+                data:
+                  peerType: HUB
+                  device: "{{ live_sdwan_active_hub.device }}"
+                  interface:
+                    id: "{{ live_sdwan_active_hub.vti.id }}"
+                    name: "{{ live_sdwan_active_hub.vti.ifname }}"
+                    type: VTI
+                  tunnelSourceInterface: >-
+                    {{ live_sdwan_active_hub.source_interface_nameif }}
+                  ipv4PoolsForSpokeVti:
+                    - id: "{{ live_sdwan_created_address_pool.id }}"
+                      name: "{{ live_sdwan_created_address_pool.name }}"
+                      type: IPv4AddressPool
+                  sendTunnelInterfaceIpToPeer: true
+                  allowIncomingIKEv2Routes: true
+                  protectedNetworks: {}
+                  connectionType: ANSWER_ONLY
+                  isLocalTunnelIdEnabled: false
+                  type: EndPoint
+                  overrideRemoteVpnFilter: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                register_as: live_sdwan_hub_endpoint
+
+            - name: Create SD-WAN spoke endpoint and request automatic SVTI
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnEndpoint
+                data:
+                  peerType: SPOKE
+                  device: "{{ live_sdwan_spoke.device }}"
+                  interface: "{{ live_sdwan_spoke.source_interface_nameif }}"
+                  tunnelSourceInterface: >-
+                    {{ live_sdwan_spoke.source_interface_nameif }}
+                  protectedNetworks: {}
+                  connectionType: ORIGINATE_ONLY
+                  isLocalTunnelIdEnabled: false
+                  type: EndPoint
+                  overrideRemoteVpnFilter: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                register_as: live_sdwan_spoke_endpoint
+
+            - name: Get spoke VTIs after SD-WAN endpoint creation
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDVTIInterface
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_spoke.device.id }}"
+                query_params:
+                  expanded: true
+                register_as: live_sdwan_spoke_vtis_after
+
+            - name: Select automatically generated spoke SVTI
+              ansible.builtin.set_fact:
+                live_sdwan_generated_spoke_vtis: >-
+                  {{ live_sdwan_spoke_vtis_after
+                     | default([])
+                     | rejectattr('id', 'in', live_sdwan_spoke_vti_ids_before)
+                     | list }}
+
+            - name: Require exactly one automatically generated spoke SVTI
+              ansible.builtin.assert:
+                that:
+                  - live_sdwan_generated_spoke_vtis | length == 1
+                fail_msg: >-
+                  AUTO_VPN must create exactly one new spoke SVTI. Found
+                  {{ live_sdwan_generated_spoke_vtis | length }}.
+
+            - name: Store automatically generated spoke SVTI
+              ansible.builtin.set_fact:
+                live_sdwan_generated_spoke_vti: >-
+                  {{ live_sdwan_generated_spoke_vtis[0] }}
+
+            - name: Read automatically generated spoke SVTI
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDVTIInterface
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_spoke.device.id }}"
+                  objectId: "{{ live_sdwan_generated_spoke_vti.id }}"
+                register_as: live_sdwan_generated_spoke_vti_get
+
+            - name: Assert automatically generated spoke SVTI persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_sdwan_generated_spoke_vti_get.id
+                    == live_sdwan_generated_spoke_vti.id
+                  - live_sdwan_generated_spoke_vti_get.type == 'VTIInterface'
+                  - live_sdwan_generated_spoke_vti_get.tunnelType == 'STATIC'
+                  - live_sdwan_generated_spoke_vti_get.enabled | bool
+                  - >-
+                    live_sdwan_generated_spoke_vti_get.securityZone.id
+                    == live_route_security_zone.id
+                  - >-
+                    live_sdwan_generated_spoke_vti_get.tunnelSource.id
+                    == live_sdwan_spoke.source_interface.id
+
+            - name: Get complete SD-WAN endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnEndpoint
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_vpn.id }}"
+                query_params:
+                  expanded: true
+                register_as: live_sdwan_endpoints_get
+
+            - name: Assert complete SD-WAN endpoint configuration
+              ansible.builtin.assert:
+                that:
+                  - live_sdwan_endpoints_get | length == 2
+                  - >-
+                    live_sdwan_endpoints_get
+                    | map(attribute='peerType')
+                    | difference(['HUB', 'SPOKE'])
+                    | length == 0
+                  - >-
+                    (live_sdwan_endpoints_get
+                     | selectattr('peerType', 'equalto', 'HUB')
+                     | first).interface.id == live_sdwan_active_hub.vti.id
+                  - >-
+                    (live_sdwan_endpoints_get
+                     | selectattr('peerType', 'equalto', 'SPOKE')
+                     | first).device.id == live_sdwan_spoke.device.id
+
+            - name: Deploy SD-WAN AUTO_VPN configuration
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids:
+                  - "{{ live_sdwan_active_hub.device.id }}"
+                  - "{{ live_sdwan_spoke.device.id }}"
+                fmcansible_s2s_deployment_note: >-
+                  Deploy {{ fmcansible_s2s_sdwan_vpn_name }}
+                fmcansible_s2s_deployment_required: true
+              when: fmcansible_s2s_deploy | bool
+          always:
+            - name: Delete SD-WAN topology and endpoints
+              ansible.builtin.include_tasks: ../tasks/cleanup_s2s_named.yml
+              vars:
+                fmcansible_s2s_vpn_name: "{{ fmcansible_s2s_sdwan_vpn_name }}"
+                fmcansible_s2s_protected_network_names: []
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Get spoke VTIs for SD-WAN cleanup
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDVTIInterface
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_spoke.device.id }}"
+                query_params:
+                  expanded: true
+                register_as: live_sdwan_spoke_vtis_for_cleanup
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete auto-generated spoke SVTI if still present
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteFTDVTIInterface
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_sdwan_spoke.device.id }}"
+                  objectId: "{{ generated_spoke_vti.id }}"
+              loop: >-
+                {{ live_sdwan_spoke_vtis_for_cleanup
+                   | default([])
+                   | rejectattr('id', 'in', live_sdwan_spoke_vti_ids_before)
+                   | list }}
+              loop_control:
+                loop_var: generated_spoke_vti
+                label: >-
+                  {{ generated_spoke_vti.ifname
+                     | default(generated_spoke_vti.id) }}
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete SD-WAN hub DVTI and loopback
+              ansible.builtin.include_tasks: >-
+                ../tasks/cleanup_s2s_route_interfaces.yml
+              loop:
+                - "{{ live_sdwan_hub }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete SD-WAN SVTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - live_route_security_zone.id is defined
+
+            - name: Get SD-WAN spoke address pools for cleanup
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllIPv4AddressPool
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_sdwan_pools_for_cleanup
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Select this run's SD-WAN spoke address pool
+              ansible.builtin.set_fact:
+                live_sdwan_pool_matches_for_cleanup: >-
+                  {{ live_sdwan_pools_for_cleanup
+                     | default([])
+                     | selectattr('name', 'equalto',
+                                  fmcansible_s2s_sdwan_pool_name)
+                     | list }}
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete this run's SD-WAN spoke address pool
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteIPv4AddressPool
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ sdwan_pool_for_cleanup.id }}"
+              loop: "{{ live_sdwan_pool_matches_for_cleanup | default([]) }}"
+              loop_control:
+                loop_var: sdwan_pool_for_cleanup
+                label: "{{ sdwan_pool_for_cleanup.name }}"
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Deploy SD-WAN AUTO_VPN removal
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids:
+                  - "{{ live_sdwan_hub.device.id }}"
+                  - "{{ live_sdwan_spoke.device.id }}"
+                fmcansible_s2s_deployment_note: >-
+                  Remove {{ fmcansible_s2s_sdwan_vpn_name }}
+                fmcansible_s2s_deployment_required: false
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - fmcansible_s2s_deploy | bool
+
+        - name: Re-read SD-WAN topologies after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDS2SVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            filters:
+              name: "{{ fmcansible_s2s_sdwan_vpn_name }}"
+            register_as: live_sdwan_vpns_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Re-read SD-WAN address pools after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIPv4AddressPool
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_sdwan_pools_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Assert SD-WAN cleanup completed
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_sdwan_vpns_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_sdwan_vpn_name)
+                | list
+                | length == 0
+              - >-
+                (live_sdwan_pools_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_sdwan_pool_name)
+                | list
+                | length == 0
+          when: fmcansible_cleanup_after_test | bool

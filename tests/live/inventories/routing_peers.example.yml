@@ -1,0 +1,13 @@
+---
+all:
+  children:
+    routing_peers:
+      hosts:
+        routing-peer:
+          ansible_host: >-
+            {{ lookup('env', 'FMCANSIBLE_ROUTING_PEER_HOST') }}
+          ansible_user: >-
+            {{ lookup('env', 'FMCANSIBLE_ROUTING_PEER_USERNAME')
+               | default('automation', true) }}
+          ansible_connection: paramiko
+          ansible_become: true

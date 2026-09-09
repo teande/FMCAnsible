@@ -1,0 +1,348 @@
+---
+- name: Validate dynamic VTI hub-and-spoke S2S
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled dynamic VTI S2S test
+      ansible.builtin.debug:
+        msg: "Dynamic VTI S2S test is disabled."
+      when: not fmcansible_run_vpn_tests | bool
+
+    - name: Run dynamic VTI hub-and-spoke lifecycle test
+      when: fmcansible_run_vpn_tests | bool
+      block:
+        - name: Validate dynamic VTI S2S inputs
+          ansible.builtin.assert:
+            that:
+              - fmcansible_s2s_dvti_endpoints | length == 2
+              - >-
+                fmcansible_s2s_dvti_endpoints
+                | map(attribute='device_name')
+                | reject('equalto', '')
+                | unique
+                | list
+                | length == 2
+              - >-
+                fmcansible_s2s_dvti_endpoints
+                | map(attribute='peer_type')
+                | difference(['HUB', 'SPOKE'])
+                | length == 0
+              - >-
+                fmcansible_s2s_dvti_endpoints
+                | selectattr('peer_type', 'equalto', 'HUB')
+                | map(attribute='tunnel_type')
+                | list == ['DYNAMIC']
+              - >-
+                fmcansible_s2s_dvti_endpoints
+                | selectattr('peer_type', 'equalto', 'SPOKE')
+                | map(attribute='tunnel_type')
+                | list == ['STATIC']
+            fail_msg: >-
+              Dynamic VTI testing requires one unique HUB using DYNAMIC VTI
+              and one unique SPOKE using STATIC VTI.
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_dvti_domains
+
+        - name: Initialize dynamic VTI S2S facts
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_dvti_domains[fmcansible_domain_index].uuid }}
+            live_route_resolved_endpoints: []
+            live_route_active_endpoints: []
+            live_route_security_zone: {}
+
+        - name: Get managed devices once
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_devices
+
+        - name: Resolve hub and spoke source interfaces
+          ansible.builtin.include_tasks: ../tasks/resolve_s2s_route_endpoint.yml
+          loop: "{{ fmcansible_s2s_dvti_endpoints }}"
+          loop_control:
+            loop_var: route_endpoint
+            label: "{{ route_endpoint.device_name }}"
+
+        - name: Create, deploy, validate, and remove dynamic VTI S2S
+          block:
+            - name: Create dedicated dynamic VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: createMultipleSecurityZoneObject
+                data:
+                  - name: "{{ fmcansible_s2s_dvti_zone_name }}"
+                    type: SecurityZone
+                    interfaceMode: ROUTED
+                    interfaces: []
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                query_params:
+                  bulk: true
+                register_as: live_dvti_security_zones
+
+            - name: Store dedicated dynamic VTI security zone
+              ansible.builtin.set_fact:
+                live_route_security_zone: "{{ live_dvti_security_zones[0] }}"
+
+            - name: Read dedicated dynamic VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: getSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+                register_as: live_dvti_security_zone_get
+
+            - name: Assert dynamic VTI security zone persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_dvti_security_zone_get.id
+                    == live_route_security_zone.id
+                  - >-
+                    live_dvti_security_zone_get.name
+                    == fmcansible_s2s_dvti_zone_name
+                  - live_dvti_security_zone_get.interfaceMode == 'ROUTED'
+
+            - name: Create and verify hub DVTI and spoke SVTI
+              ansible.builtin.include_tasks: >-
+                ../tasks/create_s2s_route_interfaces.yml
+              loop: "{{ live_route_resolved_endpoints }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: >-
+                  {{ route_endpoint.peer_type }} {{ route_endpoint.device.name }}
+
+            - name: Create route-based hub-and-spoke topology
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDS2SVpnModel
+                data:
+                  name: "{{ fmcansible_s2s_dvti_vpn_name }}"
+                  type: FTDS2SVpn
+                  description: "{{ fmcansible_live_prefix }}"
+                  topologyType: HUB_AND_SPOKE
+                  routeBased: true
+                  ikeV1Enabled: false
+                  ikeV2Enabled: true
+                  enableEcmpAtHub: false
+                  enableEcmpAtSpoke: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_dvti_vpn
+
+            - name: Read route-based hub-and-spoke topology
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDS2SVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_dvti_vpn.id }}"
+                register_as: live_dvti_vpn_get
+
+            - name: Assert route-based hub-and-spoke topology persisted
+              ansible.builtin.assert:
+                that:
+                  - live_dvti_vpn_get.id == live_dvti_vpn.id
+                  - live_dvti_vpn_get.name == fmcansible_s2s_dvti_vpn_name
+                  - live_dvti_vpn_get.type == 'FTDS2SVpn'
+                  - live_dvti_vpn_get.topologyType == 'HUB_AND_SPOKE'
+                  - live_dvti_vpn_get.routeBased | bool
+                  - not live_dvti_vpn_get.ikeV1Enabled | bool
+                  - live_dvti_vpn_get.ikeV2Enabled | bool
+
+            - name: Create dynamic VTI hub-and-spoke endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnEndpoint
+                data:
+                  peerType: "{{ dvti_endpoint.peer_type }}"
+                  device: "{{ dvti_endpoint.device }}"
+                  interface:
+                    id: "{{ dvti_endpoint.vti.id }}"
+                    name: "{{ dvti_endpoint.vti.ifname }}"
+                    type: VTI
+                  tunnelSourceInterface: >-
+                    {{ dvti_endpoint.source_interface_nameif }}
+                  sendTunnelInterfaceIpToPeer: true
+                  allowIncomingIKEv2Routes: true
+                  protectedNetworks: {}
+                  connectionType: BIDIRECTIONAL
+                  isLocalTunnelIdEnabled: false
+                  type: EndPoint
+                  overrideRemoteVpnFilter: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_dvti_vpn.id }}"
+              loop: "{{ live_route_active_endpoints }}"
+              loop_control:
+                loop_var: dvti_endpoint
+                label: >-
+                  {{ dvti_endpoint.peer_type }} {{ dvti_endpoint.device.name }}
+
+            - name: Get dynamic VTI hub-and-spoke endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnEndpoint
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_dvti_vpn.id }}"
+                register_as: live_dvti_endpoint_summaries
+
+            - name: Initialize complete dynamic VTI endpoint results
+              ansible.builtin.set_fact:
+                live_s2s_complete_endpoints: []
+
+            - name: Read complete dynamic VTI endpoints
+              ansible.builtin.include_tasks: ../tasks/read_s2s_endpoint.yml
+              vars:
+                live_s2s_container_uuid: "{{ live_dvti_vpn.id }}"
+              loop: "{{ live_dvti_endpoint_summaries }}"
+              loop_control:
+                loop_var: live_s2s_endpoint_summary
+                label: "{{ live_s2s_endpoint_summary.name }}"
+
+            - name: Assert every dynamic VTI endpoint persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    complete_dvti_endpoint.device.id
+                    == expected_dvti_endpoint.device.id
+                  - >-
+                    complete_dvti_endpoint.interface.id
+                    == expected_dvti_endpoint.vti.id
+                  - >-
+                    complete_dvti_endpoint.tunnelSourceInterface.id
+                    == expected_dvti_endpoint.source_interface.id
+                  - >-
+                    complete_dvti_endpoint.peerType
+                    == expected_dvti_endpoint.peer_type
+                  - complete_dvti_endpoint.connectionType == 'BIDIRECTIONAL'
+                  - complete_dvti_endpoint.sendTunnelInterfaceIpToPeer | bool
+                  - complete_dvti_endpoint.allowIncomingIKEv2Routes | bool
+                  - not complete_dvti_endpoint.isLocalTunnelIdEnabled | bool
+                  - not complete_dvti_endpoint.overrideRemoteVpnFilter | bool
+              vars:
+                expected_dvti_endpoint: >-
+                  {{ live_route_active_endpoints
+                     | selectattr('device.id', 'equalto',
+                                  complete_dvti_endpoint.device.id)
+                     | first }}
+              loop: "{{ live_s2s_complete_endpoints }}"
+              loop_control:
+                loop_var: complete_dvti_endpoint
+                label: >-
+                  {{ complete_dvti_endpoint.peerType }}
+                  {{ complete_dvti_endpoint.device.name }}
+
+            - name: Assert complete dynamic VTI S2S configuration
+              ansible.builtin.assert:
+                that:
+                  - live_dvti_endpoint_summaries | length == 2
+                  - live_s2s_complete_endpoints | length == 2
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='peerType')
+                    | difference(['HUB', 'SPOKE'])
+                    | length == 0
+                  - >-
+                    live_route_active_endpoints
+                    | selectattr('peer_type', 'equalto', 'HUB')
+                    | map(attribute='vti.tunnelType')
+                    | list == ['DYNAMIC']
+                  - >-
+                    live_route_active_endpoints
+                    | selectattr('peer_type', 'equalto', 'SPOKE')
+                    | map(attribute='vti.tunnelType')
+                    | list == ['STATIC']
+
+            - name: Deploy dynamic VTI S2S configuration
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ live_route_active_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Deploy {{ fmcansible_s2s_dvti_vpn_name }}
+                fmcansible_s2s_deployment_required: true
+              when: fmcansible_s2s_deploy | bool
+          always:
+            - name: Delete dynamic VTI S2S topology and endpoints
+              ansible.builtin.include_tasks: ../tasks/cleanup_s2s_named.yml
+              vars:
+                fmcansible_s2s_vpn_name: "{{ fmcansible_s2s_dvti_vpn_name }}"
+                fmcansible_s2s_protected_network_names: []
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete dynamic VTI S2S interfaces
+              ansible.builtin.include_tasks: >-
+                ../tasks/cleanup_s2s_route_interfaces.yml
+              loop: "{{ live_route_resolved_endpoints }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete dedicated dynamic VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - live_route_security_zone.id is defined
+
+            - name: Deploy dynamic VTI S2S removal
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ live_route_resolved_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Remove {{ fmcansible_s2s_dvti_vpn_name }}
+                fmcansible_s2s_deployment_required: false
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - fmcansible_s2s_deploy | bool
+
+        - name: Re-read dynamic VTI S2S topologies after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDS2SVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            filters:
+              name: "{{ fmcansible_s2s_dvti_vpn_name }}"
+            register_as: live_dvti_vpns_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Re-read security zones after dynamic VTI S2S cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllSecurityZoneObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_dvti_zones_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Assert dynamic VTI S2S cleanup completed
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_dvti_vpns_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_dvti_vpn_name)
+                | list
+                | length == 0
+              - >-
+                (live_dvti_zones_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_dvti_zone_name)
+                | list
+                | length == 0
+          when: fmcansible_cleanup_after_test | bool

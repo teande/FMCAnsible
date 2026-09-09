@@ -1,0 +1,259 @@
+---
+- name: Read AD CA certificate from the Ansible controller
+  ansible.builtin.set_fact:
+    fmcansible_ravpn_ad_ca_pem: >-
+      {{ lookup('ansible.builtin.file', fmcansible_ravpn_ad_ca_path) }}
+  no_log: true
+
+- name: Get trusted CA certificates
+  cisco.fmcansible.fmc_configuration:
+    operation: getExternalCACertificate
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_ad_ca_name }}"
+    register_as: live_ra_external_cas
+
+- name: Select the dedicated AD CA certificate
+  ansible.builtin.set_fact:
+    fmcansible_ra_external_ca_matches: >-
+      {{ (live_ra_external_cas | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', fmcansible_ravpn_ad_ca_name)
+         | list }}
+
+- name: Require at most one dedicated AD CA certificate
+  ansible.builtin.assert:
+    that:
+      - fmcansible_ra_external_ca_matches | length <= 1
+
+- name: Import the dedicated AD CA certificate
+  cisco.fmcansible.fmc_configuration:
+    operation: createExternalCACertificate
+    data:
+      name: "{{ fmcansible_ravpn_ad_ca_name }}"
+      type: ExternalCACertificate
+      cert: "{{ fmcansible_ravpn_ad_ca_pem }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: live_ra_external_ca_created
+  when: fmcansible_ra_external_ca_matches | length == 0
+
+- name: Store the dedicated AD CA certificate
+  ansible.builtin.set_fact:
+    fmcansible_ra_external_ca: >-
+      {{ fmcansible_ra_external_ca_matches[0]
+         if fmcansible_ra_external_ca_matches | length == 1
+         else live_ra_external_ca_created }}
+
+- name: Get configured identity realms
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: live_ra_realms
+
+- name: Select stale test identity realms
+  ansible.builtin.set_fact:
+    fmcansible_ra_stale_local_realms: >-
+      {{ (live_ra_realms | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match',
+                      '^' ~ fmcansible_cleanup_prefix
+                      ~ '.*-local-realm$')
+         | list }}
+    fmcansible_ra_stale_ad_realms: >-
+      {{ (live_ra_realms | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match',
+                      '^' ~ fmcansible_cleanup_prefix
+                      ~ '.*-ad-realm$')
+         | list }}
+
+- name: Get stale local test users
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_local_username }}"
+    register_as: live_ra_stale_local_users
+
+- name: Delete stale local test users
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_ra_local_user.id }}"
+  loop: >-
+    {{ (live_ra_stale_local_users | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_local_username)
+       | list }}
+  loop_control:
+    loop_var: stale_ra_local_user
+    label: "{{ stale_ra_local_user.name }}"
+
+- name: Delete stale test local realms
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_ra_local_realm.id }}"
+  register: stale_ra_local_realm_delete
+  retries: 3
+  delay: 10
+  until: stale_ra_local_realm_delete is succeeded
+  loop: "{{ fmcansible_ra_stale_local_realms }}"
+  loop_control:
+    loop_var: stale_ra_local_realm
+    label: "{{ stale_ra_local_realm.name }}"
+
+- name: Delete stale test AD realms
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_ra_ad_realm.id }}"
+  register: stale_ra_ad_realm_delete
+  retries: 3
+  delay: 10
+  until: stale_ra_ad_realm_delete is succeeded
+  loop: "{{ fmcansible_ra_stale_ad_realms }}"
+  loop_control:
+    loop_var: stale_ra_ad_realm
+    label: "{{ stale_ra_ad_realm.name }}"
+
+- name: Create local identity realm
+  cisco.fmcansible.fmc_configuration:
+    operation: createRealm
+    data:
+      name: "{{ fmcansible_ravpn_local_realm_name }}"
+      type: Realm
+      realmType: LOCAL
+      description: "{{ fmcansible_live_prefix }}"
+      enabled: true
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: live_ra_local_realm
+
+- name: Read back local identity realm
+  cisco.fmcansible.fmc_configuration:
+    operation: getRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_ra_local_realm.id }}"
+    register_as: live_ra_local_realm_get
+
+- name: Assert local identity realm persisted
+  ansible.builtin.assert:
+    that:
+      - live_ra_local_realm_get.id == live_ra_local_realm.id
+      - live_ra_local_realm_get.name == fmcansible_ravpn_local_realm_name
+      - live_ra_local_realm_get.realmType == 'LOCAL'
+      - live_ra_local_realm_get.enabled | bool
+
+- name: Create AD identity realm
+  cisco.fmcansible.fmc_configuration:
+    operation: createRealm
+    data:
+      name: "{{ fmcansible_ravpn_ad_realm_name }}"
+      type: Realm
+      realmType: AD
+      description: "{{ fmcansible_live_prefix }}"
+      adPrimaryDomain: "{{ fmcansible_ravpn_ad_domain }}"
+      baseDn: "{{ fmcansible_ravpn_ad_base_dn }}"
+      groupDn: "{{ fmcansible_ravpn_ad_base_dn }}"
+      groupAttribute: member
+      dirUsername: "{{ fmcansible_ravpn_ad_bind_username }}"
+      dirPassword: "{{ fmcansible_ravpn_ad_bind_password }}"
+      updateHour: 0
+      updateInterval: 24
+      activeAuthSessionTimeout: 5
+      failedAuthSessionTimeout: 30
+      guestSessionTimeout: 30
+      tsAgentSessionTimeout: 30
+      directoryConfigurations:
+        - id: 0
+          hostname: "{{ fmcansible_ravpn_ad_hostname }}"
+          port: "{{ fmcansible_ravpn_ad_port }}"
+          encryptionProtocol: LDAPS
+          useRoutingToSelectInterface: true
+          encryptionCert:
+            id: "{{ fmcansible_ra_external_ca.id }}"
+            name: "{{ fmcansible_ra_external_ca.name }}"
+            type: "{{ fmcansible_ra_external_ca.type }}"
+      includedUsers:
+        - "{{ fmcansible_ravpn_ad_test_user }}"
+      includedGroups:
+        - "{{ fmcansible_ravpn_ad_group_name }}"
+      excludedUsers: []
+      excludedGroups: []
+      enabled: true
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: live_ra_ad_realm
+  no_log: true
+
+- name: Read back AD identity realm
+  cisco.fmcansible.fmc_configuration:
+    operation: getRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_ra_ad_realm.id }}"
+    register_as: live_ra_ad_realm_get
+
+- name: Assert AD identity realm persisted
+  ansible.builtin.assert:
+    that:
+      - live_ra_ad_realm_get.id == live_ra_ad_realm.id
+      - live_ra_ad_realm_get.name == fmcansible_ravpn_ad_realm_name
+      - live_ra_ad_realm_get.realmType == 'AD'
+      - live_ra_ad_realm_get.adPrimaryDomain == fmcansible_ravpn_ad_domain
+      - live_ra_ad_realm_get.baseDn == fmcansible_ravpn_ad_base_dn
+      - live_ra_ad_realm_get.enabled | bool
+      - live_ra_ad_realm_get.directoryConfigurations | length == 1
+      - >-
+        live_ra_ad_realm_get.directoryConfigurations[0].hostname
+        == fmcansible_ravpn_ad_hostname
+      - >-
+        live_ra_ad_realm_get.directoryConfigurations[0].encryptionProtocol
+        == 'LDAPS'
+      - >-
+        live_ra_ad_realm_get.directoryConfigurations[0].encryptionCert.id
+        == fmcansible_ra_external_ca.id
+
+- name: Create local RAVPN test user
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleLocalRealmUser
+    data:
+      name: "{{ fmcansible_ravpn_local_username }}"
+      type: LocalRealmUser
+      password: "{{ fmcansible_ravpn_local_password }}"
+      description: "{{ fmcansible_live_prefix }}"
+      realm:
+        id: "{{ live_ra_local_realm_get.id }}"
+        name: "{{ live_ra_local_realm_get.name }}"
+        type: "{{ live_ra_local_realm_get.type }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: live_ra_local_user
+  no_log: >-
+    {{ not (lookup('env', 'FMCANSIBLE_SHOW_SENSITIVE_ERRORS')
+            | default('false', true) | bool) }}
+
+- name: Read back local RAVPN test user
+  cisco.fmcansible.fmc_configuration:
+    operation: getLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_ra_local_user.id }}"
+    register_as: live_ra_local_user_get
+
+- name: Assert local RAVPN test user persisted
+  ansible.builtin.assert:
+    that:
+      - live_ra_local_user_get.id == live_ra_local_user.id
+      - live_ra_local_user_get.name == fmcansible_ravpn_local_username
+      - live_ra_local_user_get.type == 'LocalRealmUser'
+      - live_ra_local_user_get.realm.id == live_ra_local_realm_get.id

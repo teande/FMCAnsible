@@ -1,0 +1,88 @@
+---
+- name: Select managed device for S2S endpoint
+  ansible.builtin.set_fact:
+    fmcansible_s2s_device_matches: >-
+      {{ (live_s2s_devices | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', fmcansible_s2s_endpoint.device_name)
+         | list }}
+
+- name: Require exactly one managed device for S2S endpoint
+  ansible.builtin.assert:
+    that:
+      - fmcansible_s2s_device_matches | length == 1
+    fail_msg: >-
+      Expected one managed device named
+      {{ fmcansible_s2s_endpoint.device_name }}, found
+      {{ fmcansible_s2s_device_matches | length }}.
+
+- name: Get physical interfaces for S2S endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ fmcansible_s2s_device_matches[0].id }}"
+    register_as: live_s2s_physical_interfaces
+
+- name: Select physical interface for S2S endpoint
+  ansible.builtin.set_fact:
+    fmcansible_s2s_interface_matches: >-
+      {{ (((live_s2s_physical_interfaces | default([]))
+           | selectattr('name', 'defined')
+           | selectattr('name', 'equalto', fmcansible_s2s_endpoint.interface_name)
+           | list)
+          + ((live_s2s_physical_interfaces | default([]))
+             | selectattr('ifname', 'defined')
+             | selectattr('ifname', 'equalto', fmcansible_s2s_endpoint.interface_name)
+             | list))
+         | unique(attribute='id')
+         | list }}
+
+- name: Require exactly one physical interface match for S2S endpoint
+  ansible.builtin.assert:
+    that:
+      - fmcansible_s2s_interface_matches | length == 1
+    fail_msg: >-
+      Device {{ fmcansible_s2s_endpoint.device_name }} must have exactly one
+      interface whose physical name or logical name is
+      {{ fmcansible_s2s_endpoint.interface_name }}.
+
+- name: Read complete physical interface for S2S endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ fmcansible_s2s_device_matches[0].id }}"
+      objectId: "{{ fmcansible_s2s_interface_matches[0].id }}"
+    register_as: live_s2s_physical_interface
+
+- name: Require an enabled named routed S2S interface
+  ansible.builtin.assert:
+    that:
+      - live_s2s_physical_interface.enabled | default(false) | bool
+      - live_s2s_physical_interface.ifname is defined
+      - live_s2s_physical_interface.ifname is not none
+      - live_s2s_physical_interface.ifname | length > 0
+      - live_s2s_physical_interface.mode | default('NONE') == 'NONE'
+    fail_msg: >-
+      Device {{ fmcansible_s2s_endpoint.device_name }} must have an
+      enabled, named, routed interface as a managed S2S VPN endpoint.
+
+- name: Store resolved S2S endpoint
+  ansible.builtin.set_fact:
+    fmcansible_s2s_resolved_endpoints: >-
+      {{ fmcansible_s2s_resolved_endpoints
+         + [{
+           'device': {
+             'name': fmcansible_s2s_device_matches[0].name,
+             'id': fmcansible_s2s_device_matches[0].id,
+             'type': fmcansible_s2s_device_matches[0].type | default('Device')
+           },
+           'interface': {
+             'name': live_s2s_physical_interface.name,
+             'id': live_s2s_physical_interface.id,
+             'type': live_s2s_physical_interface.type | default('PhysicalInterface')
+           },
+           'peer_type': fmcansible_s2s_endpoint.peer_type,
+           'protected_network': fmcansible_s2s_endpoint.protected_network
+         }] }}

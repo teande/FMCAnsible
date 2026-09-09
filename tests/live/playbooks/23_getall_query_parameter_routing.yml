@@ -1,0 +1,219 @@
+---
+- name: Validate create query parameters do not leak into GETALL lookups
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    query_test_acp_name: "{{ fmcansible_live_prefix }}-query-acp"
+    query_test_category_name: >-
+      ci-qcat-{{ (fmcansible_run_id | hash('sha1'))[:12] }}
+    query_test_anchor_rule_name: "{{ fmcansible_live_prefix }}-query-anchor"
+    query_test_before_rule_name: "{{ fmcansible_live_prefix }}-query-before"
+  tasks:
+    - name: Get FMC domain
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: query_test_domains
+
+    - name: Store FMC domain UUID
+      ansible.builtin.set_fact:
+        query_test_domain_uuid: "{{ query_test_domains[0].uuid }}"
+
+    - name: Create query-routing test access policy
+      cisco.fmcansible.fmc_configuration:
+        operation: upsertAccessPolicy
+        data:
+          name: "{{ query_test_acp_name }}"
+          type: AccessPolicy
+          defaultAction:
+            action: BLOCK
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+        register_as: query_test_acp
+
+    - name: Create category in Mandatory section
+      cisco.fmcansible.fmc_configuration:
+        operation: createAccessPolicyCategory
+        data:
+          name: "{{ query_test_category_name }}"
+          type: Category
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        query_params:
+          section: mandatory
+        register_as: query_test_category
+
+    - name: Repeat category creation to validate idempotent GETALL lookup
+      cisco.fmcansible.fmc_configuration:
+        operation: createAccessPolicyCategory
+        data:
+          name: "{{ query_test_category_name }}"
+          type: Category
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        query_params:
+          section: mandatory
+        register_as: query_test_category_repeat
+      register: query_test_category_repeat_task
+
+    - name: Read back Mandatory category
+      cisco.fmcansible.fmc_configuration:
+        operation: getAccessPolicyCategory
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+          objectId: "{{ query_test_category.id }}"
+        register_as: query_test_category_get
+
+    - name: Assert category query routing and idempotence
+      ansible.builtin.assert:
+        that:
+          - query_test_category_get.id == query_test_category.id
+          - query_test_category_repeat.id == query_test_category.id
+          - query_test_category_get.metadata.section == 'Mandatory'
+          - not query_test_category_repeat_task.changed
+
+    - name: Upsert anchor rule into the category
+      cisco.fmcansible.fmc_configuration:
+        operation: upsertAccessRule
+        data:
+          name: "{{ query_test_anchor_rule_name }}"
+          type: AccessRule
+          action: ALLOW
+          enabled: true
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        query_params:
+          category: "{{ query_test_category_name }}"
+        register_as: query_test_anchor_rule
+
+    - name: Repeat anchor rule upsert to validate idempotent GETALL lookup
+      cisco.fmcansible.fmc_configuration:
+        operation: upsertAccessRule
+        data:
+          name: "{{ query_test_anchor_rule_name }}"
+          type: AccessRule
+          action: ALLOW
+          enabled: true
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        query_params:
+          category: "{{ query_test_category_name }}"
+        register_as: query_test_anchor_rule_repeat
+      register: query_test_anchor_rule_repeat_task
+
+    - name: Read back anchor rule
+      cisco.fmcansible.fmc_configuration:
+        operation: getAccessRule
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+          objectId: "{{ query_test_anchor_rule.id }}"
+        register_as: query_test_anchor_rule_get
+
+    - name: Assert category query was applied to anchor rule
+      ansible.builtin.assert:
+        that:
+          - query_test_anchor_rule_repeat.id == query_test_anchor_rule.id
+          - not query_test_anchor_rule_repeat_task.changed
+          - query_test_anchor_rule_get.metadata.section == 'Mandatory'
+          - query_test_anchor_rule_get.metadata.category == query_test_category_name
+
+    - name: Upsert second rule before the anchor rule
+      cisco.fmcansible.fmc_configuration:
+        operation: upsertAccessRule
+        data:
+          name: "{{ query_test_before_rule_name }}"
+          type: AccessRule
+          action: BLOCK
+          enabled: true
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        query_params:
+          insertBefore: "{{ query_test_anchor_rule_get.metadata.ruleIndex }}"
+        register_as: query_test_before_rule
+
+    - name: Read back both access rules after insertion
+      cisco.fmcansible.fmc_configuration:
+        operation: getAccessRule
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+          objectId: "{{ query_rule_id }}"
+        register_as: query_test_rule_get
+      loop:
+        - "{{ query_test_before_rule.id }}"
+        - "{{ query_test_anchor_rule.id }}"
+      loop_control:
+        loop_var: query_rule_id
+      register: query_test_rule_reads
+
+    - name: Assert insertBefore query was applied
+      ansible.builtin.assert:
+        that:
+          - query_test_rule_reads.results[0].ansible_facts.query_test_rule_get.name == query_test_before_rule_name
+          - query_test_rule_reads.results[1].ansible_facts.query_test_rule_get.name == query_test_anchor_rule_name
+          - >-
+            query_test_rule_reads.results[0].ansible_facts.query_test_rule_get.metadata.category
+            == query_test_category_name
+
+    - name: Delete query-routing test access rules
+      cisco.fmcansible.fmc_configuration:
+        operation: deleteAccessRule
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+          objectId: "{{ query_rule_id }}"
+      loop:
+        - "{{ query_test_before_rule.id }}"
+        - "{{ query_test_anchor_rule.id }}"
+      loop_control:
+        loop_var: query_rule_id
+
+    - name: Verify access rules were removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessRule
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          containerUUID: "{{ query_test_acp.id }}"
+        register_as: query_test_rules_after_cleanup
+
+    - name: Assert access-rule cleanup
+      ansible.builtin.assert:
+        that:
+          - >-
+            (query_test_rules_after_cleanup
+             | selectattr('name', 'in',
+                 [query_test_before_rule_name, query_test_anchor_rule_name])
+             | list
+             | length) == 0
+
+    - name: Delete query-routing test access policy
+      cisco.fmcansible.fmc_configuration:
+        operation: deleteAccessPolicy
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+          objectId: "{{ query_test_acp.id }}"
+
+    - name: Verify access policy was removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessPolicy
+        path_params:
+          domainUUID: "{{ query_test_domain_uuid }}"
+        filters:
+          name: "{{ query_test_acp_name }}"
+      register: query_test_acp_after_cleanup_task
+
+    - name: Assert access-policy cleanup
+      ansible.builtin.assert:
+        that:
+          - >-
+            (query_test_acp_after_cleanup_task.response | default([]))
+            | length == 0

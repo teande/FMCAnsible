@@ -1,0 +1,106 @@
+---
+- name: Test issue 56 upsert beyond the first lookup page
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars:
+    issue56_page_prefix: "ci-issue56-page-{{ lookup('env', 'FMCANSIBLE_RUN_ID') }}"
+    issue56_target_name: "{{ issue56_page_prefix }}-zz-target"
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: issue56_page_domains
+
+    - name: Build issue 56 object list
+      ansible.builtin.set_fact:
+        issue56_page_domain_uuid: "{{ issue56_page_domains[0].uuid }}"
+        issue56_page_objects: []
+
+    - name: Add twelve filler hosts
+      ansible.builtin.set_fact:
+        issue56_page_objects: >-
+          {{ issue56_page_objects +
+             [{'name': issue56_page_prefix + '-filler-' + ('%02d' | format(item)),
+               'type': 'Host',
+               'value': '198.18.57.' + ((item + 1) | string),
+               'description': 'FMCAnsible issue 56 pagination'}] }}
+      loop: "{{ range(0, 12) | list }}"
+
+    - name: Add target host last
+      ansible.builtin.set_fact:
+        issue56_page_objects: >-
+          {{ issue56_page_objects +
+             [{'name': issue56_target_name,
+               'type': 'Host',
+               'value': '198.18.57.250',
+               'description': 'FMCAnsible issue 56 pagination'}] }}
+
+    - name: Test paged upsert lookup
+      block:
+        - name: Create paged lookup fixtures
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data: "{{ issue56_page_objects }}"
+            path_params:
+              domainUUID: "{{ issue56_page_domain_uuid }}"
+            query_params:
+              bulk: true
+            register_as: issue56_page_created
+
+        - name: Repeat target with upsert
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertHostObject
+            data:
+              name: "{{ issue56_target_name }}"
+              type: Host
+              value: 198.18.57.250
+              description: FMCAnsible issue 56 pagination
+            path_params:
+              domainUUID: "{{ issue56_page_domain_uuid }}"
+            register_as: issue56_page_target
+          register: issue56_page_upsert_result
+
+        - name: Assert paged upsert is idempotent
+          ansible.builtin.assert:
+            that:
+              - not issue56_page_upsert_result.changed
+              - issue56_page_target.name == issue56_target_name
+              - issue56_page_target.value == '198.18.57.250'
+      always:
+        - name: Find paged lookup fixtures
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllHostObject
+            path_params:
+              domainUUID: "{{ issue56_page_domain_uuid }}"
+            register_as: issue56_page_hosts_for_cleanup
+
+        - name: Delete paged lookup fixtures
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteHostObject
+            path_params:
+              domainUUID: "{{ issue56_page_domain_uuid }}"
+              objectId: "{{ issue56_page_host.id }}"
+          loop: >-
+            {{ issue56_page_hosts_for_cleanup
+               | selectattr('name', 'in', issue56_page_objects | map(attribute='name') | list)
+               | list }}
+          loop_control:
+            loop_var: issue56_page_host
+            label: "{{ issue56_page_host.name }}"
+
+    - name: Verify paged lookup fixture cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ issue56_page_domain_uuid }}"
+        register_as: issue56_page_hosts_after_cleanup
+
+    - name: Assert paged lookup fixtures were removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            issue56_page_hosts_after_cleanup
+            | selectattr('name', 'in', issue56_page_objects | map(attribute='name') | list)
+            | list
+            | length == 0

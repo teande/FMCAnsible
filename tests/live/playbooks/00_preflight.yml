@@ -1,0 +1,136 @@
+---
+- name: FMCAnsible live preflight
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../vars/feature_matrix.yml
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Validate live target type
+      ansible.builtin.assert:
+        that:
+          - fmcansible_target in fmcansible_platform_matrix
+        fail_msg: "Unsupported fmcansible_target={{ fmcansible_target }}"
+
+    - name: Validate isolated run identifier
+      ansible.builtin.assert:
+        that:
+          - fmcansible_run_id | length > 0
+          - fmcansible_run_id is match('^[A-Za-z0-9_.-]+$')
+        fail_msg: >-
+          Set FMCANSIBLE_RUN_ID to a unique value containing only letters,
+          numbers, dots, underscores, or hyphens.
+
+    - name: Build generated resource-name list
+      ansible.builtin.set_fact:
+        fmcansible_generated_resource_names: >-
+          {{
+            [
+              fmcansible_object_single.name,
+              fmcansible_access_policy_name,
+              fmcansible_access_rule_name,
+              fmcansible_access_rule_bulk_name,
+              fmcansible_file_policy_name,
+              fmcansible_access_category_name,
+              fmcansible_access_reference_rule_name,
+              fmcansible_access_source_network_name,
+              fmcansible_access_destination_network_name,
+              fmcansible_access_source_group_name,
+              fmcansible_access_destination_group_name,
+              fmcansible_access_source_zone_name,
+              fmcansible_access_destination_zone_name,
+              fmcansible_access_policy_advanced_name,
+              fmcansible_platform_policy_name,
+              fmcansible_ravpn_name,
+              fmcansible_ravpn_certificate_name,
+              fmcansible_ravpn_pool_name,
+              fmcansible_ravpn_dap_name,
+              fmcansible_ravpn_group_policy_name,
+              fmcansible_ravpn_local_profile_name,
+              fmcansible_ravpn_ad_profile_name,
+              fmcansible_ravpn_ad_realm_name,
+              fmcansible_s2s_vpn_name
+            ]
+            + (fmcansible_object_bulk | map(attribute='name') | list)
+            + (
+                fmcansible_s2s_endpoints
+                | map(attribute='protected_network')
+                | map(attribute='name')
+                | list
+              )
+          }}
+
+    - name: Validate generated resource-name lengths
+      ansible.builtin.assert:
+        that:
+          - fmcansible_generated_resource_name | length <= 48
+        fail_msg: >-
+          Generated resource name {{ fmcansible_generated_resource_name }} is
+          longer than the live suite's conservative 48-character limit. Use a
+          shorter FMCANSIBLE_RUN_ID.
+      loop: "{{ fmcansible_generated_resource_names }}"
+      loop_control:
+        loop_var: fmcansible_generated_resource_name
+        label: "{{ fmcansible_generated_resource_name }}"
+
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Assert at least one domain exists
+      ansible.builtin.assert:
+        that:
+          - live_domains is defined
+          - live_domains | length > 0
+
+    - name: Store domain UUID for subsequent playbooks
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+
+    - name: Get on-prem FMC version
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllServerVersion
+        register_as: live_server_versions
+      when: fmcansible_target == 'onprem'
+
+    - name: Store on-prem FMC version
+      ansible.builtin.set_fact:
+        fmcansible_server_version: >-
+          {{ live_server_versions[0].serverVersion }}
+      when: fmcansible_target == 'onprem'
+
+    - name: Enforce approved FMC version
+      ansible.builtin.assert:
+        that:
+          - not fmcansible_enforce_ga_version | bool or
+            fmcansible_server_version in fmcansible_allowed_fmc_versions
+        fail_msg: >-
+          FMC version {{ fmcansible_server_version }} is not in the approved
+          GA allowlist: {{ fmcansible_allowed_fmc_versions }}.
+        success_msg: >-
+          FMC version {{ fmcansible_server_version }} passed the configured
+          version policy.
+      when: fmcansible_target == 'onprem'
+
+    - name: Warn when GA version enforcement is disabled
+      ansible.builtin.debug:
+        msg: >-
+          Development mode: FMC {{ fmcansible_server_version }} is not being
+          treated as a GA release qualification target.
+      when:
+        - fmcansible_target == 'onprem'
+        - not fmcansible_enforce_ga_version | bool
+
+    - name: Show live test target
+      ansible.builtin.debug:
+        msg:
+          target: "{{ fmcansible_target }}"
+          server_version: "{{ fmcansible_server_version | default('cloud-managed') }}"
+          domain_uuid: "{{ fmcansible_domain_uuid }}"
+          prefix: "{{ fmcansible_live_prefix }}"
+          vpn_tests_enabled: "{{ fmcansible_run_vpn_tests }}"
+          deploy_tests_enabled: "{{ fmcansible_run_deploy_tests }}"
+          token_refresh_tests_enabled: "{{ fmcansible_run_token_refresh_tests }}"

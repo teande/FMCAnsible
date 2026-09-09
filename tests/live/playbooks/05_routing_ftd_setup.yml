@@ -1,0 +1,300 @@
+---
+- name: Prepare the dedicated routing FTD
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Validate routing FTD setup inputs
+      ansible.builtin.assert:
+        that:
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_secondary_hardware_name | length > 0
+          - fmcansible_routing_secondary_interface_name | length > 0
+          - fmcansible_routing_secondary_zone_name | length > 0
+          - fmcansible_routing_secondary_ipv4_address | length > 0
+
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_routing_setup_domains
+
+    - name: Store FMC domain
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_routing_setup_domains[fmcansible_domain_index].uuid }}
+
+    - name: Get managed devices
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_setup_devices
+
+    - name: Select routing test device
+      ansible.builtin.set_fact:
+        live_routing_setup_device_matches: >-
+          {{ (live_routing_setup_devices | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_test_device_name)
+             | list }}
+
+    - name: Require exactly one routing test device
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_device_matches | length == 1
+
+    - name: Store routing test device
+      ansible.builtin.set_fact:
+        fmcansible_routing_device: "{{ live_routing_setup_device_matches[0] }}"
+
+    - name: Get routing security zones
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllSecurityZoneObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_setup_zones
+
+    - name: Select secondary routing security zone
+      ansible.builtin.set_fact:
+        live_routing_setup_zone_matches: >-
+          {{ (live_routing_setup_zones | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_secondary_zone_name)
+             | list }}
+
+    - name: Refuse duplicate secondary routing security zones
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_zone_matches | length <= 1
+
+    - name: Create secondary routing security zone when absent
+      cisco.fmcansible.fmc_configuration:
+        operation: createMultipleSecurityZoneObject
+        data:
+          - name: "{{ fmcansible_routing_secondary_zone_name }}"
+            type: SecurityZone
+            interfaceMode: ROUTED
+            interfaces: []
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        query_params:
+          bulk: true
+      register: live_routing_setup_zone_create
+      when: live_routing_setup_zone_matches | length == 0
+
+    - name: Read routing security zones after convergence
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllSecurityZoneObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_setup_zones_after
+
+    - name: Select converged secondary routing security zone
+      ansible.builtin.set_fact:
+        live_routing_setup_zone_after_matches: >-
+          {{ (live_routing_setup_zones_after | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_secondary_zone_name)
+             | list }}
+
+    - name: Require one converged secondary routing security zone
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_zone_after_matches | length == 1
+
+    - name: Get physical interfaces
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: live_routing_setup_interfaces
+
+    - name: Select the secondary interface before synchronization
+      ansible.builtin.set_fact:
+        live_routing_setup_initial_interface_matches: >-
+          {{ (live_routing_setup_interfaces | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_secondary_hardware_name)
+             | list }}
+
+    - name: Get pending interface events when the interface is absent
+      cisco.fmcansible.fmc_configuration:
+        operation: getInterfaceEvent
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: live_routing_setup_interface_events
+      when: live_routing_setup_initial_interface_matches | length == 0
+
+    - name: Select the secondary interface association event
+      ansible.builtin.set_fact:
+        live_routing_setup_interface_event_matches: >-
+          {{ (live_routing_setup_interface_events | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_secondary_hardware_name)
+             | selectattr('state', 'defined')
+             | selectattr('state', 'in', ['ASSOCIATED', 'MODIFIED'])
+             | list }}
+      when: live_routing_setup_initial_interface_matches | length == 0
+
+    - name: Require a matching pending interface event
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_interface_event_matches | length >= 1
+        fail_msg: >-
+          The FTD does not expose {{ fmcansible_routing_secondary_hardware_name }}
+          and FMC has no matching interface association event to accept.
+      when: live_routing_setup_initial_interface_matches | length == 0
+
+    - name: Accept the FTD interface inventory change
+      cisco.fmcansible.fmc_configuration:
+        operation: createInterfaceEvent
+        data:
+          action: ACCEPT_CHANGES
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+      when: live_routing_setup_initial_interface_matches | length == 0
+
+    - name: Wait for FMC to import the interface inventory
+      ansible.builtin.pause:
+        seconds: 15
+      when: live_routing_setup_initial_interface_matches | length == 0
+
+    - name: Read physical interfaces after synchronization
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: live_routing_setup_interfaces_after_sync
+
+    - name: Select the dedicated secondary routing interface
+      ansible.builtin.set_fact:
+        live_routing_setup_interface_matches: >-
+          {{ (live_routing_setup_interfaces_after_sync | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_secondary_hardware_name)
+             | list }}
+
+    - name: Require one dedicated secondary routing interface
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_interface_matches | length == 1
+        fail_msg: >-
+          Expected one physical interface named
+          {{ fmcansible_routing_secondary_hardware_name }} on
+          {{ fmcansible_routing_test_device_name }}.
+
+    - name: Read complete secondary routing interface
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+          objectId: "{{ live_routing_setup_interface_matches[0].id }}"
+        register_as: live_routing_setup_interface
+
+    - name: Determine whether the secondary routing interface needs an update
+      ansible.builtin.set_fact:
+        live_routing_setup_interface_needs_update: >-
+          {{ not (
+               (live_routing_setup_interface.enabled | default(false) | bool)
+               and live_routing_setup_interface.ifname | default('')
+                   == fmcansible_routing_secondary_interface_name
+               and live_routing_setup_interface.securityZone.id | default('')
+                   == live_routing_setup_zone_after_matches[0].id
+               and live_routing_setup_interface.ipv4.static.address
+                   | default('')
+                   == fmcansible_routing_secondary_ipv4_address
+               and (live_routing_setup_interface.ipv4.static.netmask
+                    | default('') | string)
+                   == (fmcansible_routing_secondary_ipv4_prefix | string)
+             ) }}
+
+    - name: Configure the secondary routing interface
+      cisco.fmcansible.fmc_configuration:
+        operation: updateFTDPhysicalInterface
+        data:
+          type: PhysicalInterface
+          id: "{{ live_routing_setup_interface.id }}"
+          name: "{{ fmcansible_routing_secondary_hardware_name }}"
+          mode: NONE
+          enabled: true
+          ifname: "{{ fmcansible_routing_secondary_interface_name }}"
+          description: Dedicated FMCAnsible routing CI egress
+          MTU: 1500
+          priority: "{{ live_routing_setup_interface.priority | default(0) }}"
+          managementOnly: false
+          nveOnly: false
+          enableSGTPropagate: false
+          securityZone:
+            id: "{{ live_routing_setup_zone_after_matches[0].id }}"
+            type: SecurityZone
+          ipv4:
+            static:
+              address: "{{ fmcansible_routing_secondary_ipv4_address }}"
+              netmask: "{{ fmcansible_routing_secondary_ipv4_prefix | string }}"
+          ipv6:
+            enableIPV6: false
+          pathMonitoring:
+            enable: false
+          applicationMonitoring:
+            enable: true
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+          objectId: "{{ live_routing_setup_interface.id }}"
+      register: live_routing_setup_interface_update
+      when: live_routing_setup_interface_needs_update | bool
+
+    - name: Read back secondary routing interface
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+          objectId: "{{ live_routing_setup_interface.id }}"
+        register_as: live_routing_setup_interface_after
+
+    - name: Assert secondary routing interface persisted
+      ansible.builtin.assert:
+        that:
+          - live_routing_setup_interface_after.enabled | bool
+          - >-
+            live_routing_setup_interface_after.ifname
+            == fmcansible_routing_secondary_interface_name
+          - >-
+            live_routing_setup_interface_after.securityZone.id
+            == live_routing_setup_zone_after_matches[0].id
+          - >-
+            live_routing_setup_interface_after.ipv4.static.address
+            == fmcansible_routing_secondary_ipv4_address
+          - >-
+            (live_routing_setup_interface_after.ipv4.static.netmask | string)
+            == (fmcansible_routing_secondary_ipv4_prefix | string)
+
+    - name: Deploy secondary routing interface
+      ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+      vars:
+        fmcansible_routing_deployment_note: >-
+          {{ fmcansible_live_prefix }} prepare secondary routing interface
+      when: >-
+        (live_routing_setup_zone_create.changed | default(false) | bool)
+        or (live_routing_setup_interface_update.changed
+            | default(false) | bool)

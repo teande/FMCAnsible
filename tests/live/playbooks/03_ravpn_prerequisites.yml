@@ -1,0 +1,179 @@
+---
+- name: Discover live RAVPN prerequisites
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: ravpn_discovery_domains
+
+    - name: Store RAVPN discovery domain UUID
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ ravpn_discovery_domains[fmcansible_domain_index].uuid }}
+
+    - name: Get RAVPN access security zones
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllSecurityZoneObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: ravpn_discovery_zones
+
+    - name: Get Secure Client packages
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAnyConnectPackageModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: ravpn_discovery_packages
+
+    - name: Get IKEv2 policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllIkev2PolicyObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: ravpn_discovery_ikev2_policies
+
+    - name: Get managed devices
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        query_params:
+          expanded: true
+        register_as: ravpn_discovery_devices
+
+    - name: Get Smart Licensing state
+      cisco.fmcansible.fmc_configuration:
+        operation: getSmartLicense
+        register_as: ravpn_discovery_smart_licenses
+
+    - name: Get managed-device licenses
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDeviceLicense
+        query_params:
+          expanded: true
+        register_as: ravpn_discovery_device_licenses
+
+    - name: Select the RAVPN target and its license
+      ansible.builtin.set_fact:
+        ravpn_discovery_target_devices: >-
+          {{ (ravpn_discovery_devices | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_ravpn_target_device_name)
+             | list }}
+        ravpn_discovery_target_licenses: >-
+          {{ (ravpn_discovery_device_licenses | default([]))
+             | selectattr('id', 'equalto',
+                          ((ravpn_discovery_devices | default([]))
+                           | selectattr('name', 'defined')
+                           | selectattr('name', 'equalto',
+                                        fmcansible_ravpn_target_device_name)
+                           | map(attribute='id')
+                           | first
+                           | default('')))
+             | list }}
+      when: fmcansible_ravpn_target_device_name | length > 0
+
+    - name: Require one RAVPN target license
+      ansible.builtin.assert:
+        that:
+          - ravpn_discovery_target_devices | length == 1
+          - ravpn_discovery_target_licenses | length == 1
+      when: fmcansible_ravpn_target_device_name | length > 0
+
+    - name: Enable the dedicated CI device Secure Client license
+      cisco.fmcansible.fmc_configuration:
+        operation: updateDeviceLicense
+        data:
+          id: "{{ ravpn_discovery_target_licenses[0].id }}"
+          type: DeviceLicense
+          performanceTier: >-
+            {{ ravpn_discovery_target_licenses[0].performanceTier }}
+          licenseTypes: >-
+            {{ ((ravpn_discovery_target_licenses[0].licenseTypes | default([]))
+                + [fmcansible_ravpn_required_license]) | unique | list }}
+        path_params:
+          objectId: "{{ ravpn_discovery_target_licenses[0].id }}"
+        register_as: ravpn_configured_device_license
+      when:
+        - fmcansible_ravpn_configure_device_license | bool
+        - fmcansible_ravpn_required_license not in
+          (ravpn_discovery_target_licenses[0].licenseTypes | default([]))
+
+    - name: Re-read managed-device licenses
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDeviceLicense
+        query_params:
+          expanded: true
+        register_as: ravpn_discovery_device_licenses_after
+      when: fmcansible_ravpn_target_device_name | length > 0
+
+    - name: Select the current RAVPN target license
+      ansible.builtin.set_fact:
+        ravpn_discovery_target_license_after: >-
+          {{ (ravpn_discovery_device_licenses_after | default([]))
+             | selectattr('id', 'equalto',
+                          ravpn_discovery_target_devices[0].id)
+             | first }}
+      when: fmcansible_ravpn_target_device_name | length > 0
+
+    - name: Require the configured Secure Client license
+      ansible.builtin.assert:
+        that:
+          - >-
+            fmcansible_ravpn_required_license in
+            (ravpn_discovery_target_license_after.licenseTypes | default([]))
+        fail_msg: >-
+          {{ fmcansible_ravpn_target_device_name }} does not have
+          {{ fmcansible_ravpn_required_license }}. Run this prerequisite
+          playbook with FMCANSIBLE_RAVPN_CONFIGURE_DEVICE_LICENSE=true after
+          confirming the Smart Account entitlement.
+      when:
+        - fmcansible_ravpn_target_device_name | length > 0
+        - fmcansible_ravpn_configure_device_license | bool
+
+    - name: Get configured identity realms
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllRealm
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: ravpn_discovery_realms
+
+    - name: Get trusted external CA certificates
+      cisco.fmcansible.fmc_configuration:
+        operation: getExternalCACertificate
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: ravpn_discovery_external_cas
+
+    - name: Report live RAVPN prerequisites
+      ansible.builtin.debug:
+        msg:
+          domain_uuid: "{{ fmcansible_domain_uuid }}"
+          access_security_zones: >-
+            {{ (ravpn_discovery_zones | default([]))
+               | map(attribute='name') | list | sort }}
+          secure_client_packages: >-
+            {{ (ravpn_discovery_packages | default([]))
+               | map(attribute='name') | list | sort }}
+          ikev2_policies: >-
+            {{ (ravpn_discovery_ikev2_policies | default([]))
+               | map(attribute='name') | list | sort }}
+          managed_devices: >-
+            {{ (ravpn_discovery_devices | default([]))
+               | map(attribute='name') | list | sort }}
+          smart_license: "{{ ravpn_discovery_smart_licenses | default([]) }}"
+          target_device_license: >-
+            {{ ravpn_discovery_target_license_after | default({}) }}
+          identity_realms: >-
+            {{ (ravpn_discovery_realms | default([]))
+               | map(attribute='name') | list | sort }}
+          identity_realm_details: "{{ ravpn_discovery_realms | default([]) }}"
+          trusted_external_cas: >-
+            {{ (ravpn_discovery_external_cas | default([]))
+               | map(attribute='name') | list | sort }}

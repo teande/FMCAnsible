@@ -1,0 +1,198 @@
+---
+- name: Get existing loopbacks on route-based S2S device
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_existing_loopbacks
+
+- name: Get existing VTIs on route-based S2S device
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_existing_vtis
+
+- name: Select interfaces using dedicated CI IDs
+  ansible.builtin.set_fact:
+    live_route_loopback_id_matches: >-
+      {{ (live_route_existing_loopbacks | default([]))
+         | selectattr('loopbackId', 'defined')
+         | selectattr('loopbackId', 'equalto', route_endpoint.loopback_id)
+         | list }}
+    live_route_vti_id_matches: >-
+      {{ (live_route_existing_vtis | default([]))
+         | selectattr('tunnelId', 'defined')
+         | selectattr('tunnelId', 'equalto', route_endpoint.tunnel_id)
+         | list }}
+
+- name: Refuse to replace non-CI interfaces
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_route_loopback_id_matches
+        | rejectattr('description', 'defined')
+        | list
+        | length == 0
+      - >-
+        live_route_loopback_id_matches
+        | selectattr('description', 'defined')
+        | rejectattr('description', 'match',
+                     '^' ~ fmcansible_cleanup_prefix)
+        | list
+        | length == 0
+      - >-
+        live_route_vti_id_matches
+        | rejectattr('description', 'defined')
+        | list
+        | length == 0
+      - >-
+        live_route_vti_id_matches
+        | selectattr('description', 'defined')
+        | rejectattr('description', 'match',
+                     '^' ~ fmcansible_cleanup_prefix)
+        | list
+        | length == 0
+    fail_msg: >-
+      Dedicated CI loopback {{ route_endpoint.loopback_id }} or tunnel
+      {{ route_endpoint.tunnel_id }} is used by a non-CI interface on
+      {{ route_endpoint.device.name }}. No existing interface was changed.
+
+- name: Delete stale CI VTI using the dedicated tunnel ID
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ stale_route_vti.id }}"
+  loop: "{{ live_route_vti_id_matches }}"
+  loop_control:
+    loop_var: stale_route_vti
+    label: "{{ stale_route_vti.ifname | default(stale_route_vti.id) }}"
+
+- name: Delete stale CI loopback using the dedicated loopback ID
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ stale_route_loopback.id }}"
+  loop: "{{ live_route_loopback_id_matches }}"
+  loop_control:
+    loop_var: stale_route_loopback
+    label: >-
+      {{ stale_route_loopback.ifname | default(stale_route_loopback.id) }}
+
+- name: Create borrowed-IP loopback interface
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDLoopbackInterface
+    data:
+      type: LoopbackInterface
+      loopbackId: "{{ route_endpoint.loopback_id }}"
+      enabled: true
+      ifname: "{{ route_endpoint.loopback_ifname }}"
+      description: "{{ fmcansible_live_prefix }}"
+      ipv4:
+        static:
+          address: "{{ route_endpoint.loopback_address }}"
+          netmask: "{{ route_endpoint.loopback_netmask }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    register_as: live_route_created_loopback
+
+- name: Read borrowed-IP loopback interface
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ live_route_created_loopback.id }}"
+    register_as: live_route_loopback_get
+
+- name: Assert borrowed-IP loopback persisted
+  ansible.builtin.assert:
+    that:
+      - live_route_loopback_get.id == live_route_created_loopback.id
+      - live_route_loopback_get.type == 'LoopbackInterface'
+      - live_route_loopback_get.loopbackId == route_endpoint.loopback_id
+      - live_route_loopback_get.ifname == route_endpoint.loopback_ifname
+      - live_route_loopback_get.enabled | bool
+      - >-
+        live_route_loopback_get.ipv4.static.address
+        == route_endpoint.loopback_address
+      - >-
+        live_route_loopback_get.ipv4.static.netmask
+        == route_endpoint.loopback_netmask
+
+- name: Create VTI borrowing the loopback address
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleFTDVTIInterface
+    data:
+      type: VTIInterface
+      tunnelSource: "{{ route_endpoint.source_interface }}"
+      tunnelType: "{{ route_endpoint.tunnel_type | default('STATIC') }}"
+      tunnelId: "{{ route_endpoint.tunnel_id }}"
+      enabled: true
+      ifname: "{{ route_endpoint.tunnel_ifname }}"
+      description: "{{ fmcansible_live_prefix }}"
+      securityZone:
+        id: "{{ live_route_security_zone.id }}"
+        name: "{{ live_route_security_zone.name }}"
+        type: SecurityZone
+      ipAddressAssignmentType: BORROW_IP_FROM_INTERFACE
+      borrowIPfrom:
+        id: "{{ live_route_loopback_get.id }}"
+        name: >-
+          {{ live_route_loopback_get.name
+             | default(live_route_loopback_get.ifname, true) }}
+        type: LoopbackInterface
+      ipsecMode: ipv4
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    register_as: live_route_created_vti
+
+- name: Read borrowed-IP VTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ live_route_created_vti.id }}"
+    register_as: live_route_vti_get
+
+- name: Assert borrowed-IP VTI persisted
+  ansible.builtin.assert:
+    that:
+      - live_route_vti_get.id == live_route_created_vti.id
+      - live_route_vti_get.type == 'VTIInterface'
+      - >-
+        live_route_vti_get.tunnelType
+        == route_endpoint.tunnel_type | default('STATIC')
+      - live_route_vti_get.tunnelId == route_endpoint.tunnel_id
+      - live_route_vti_get.ifname == route_endpoint.tunnel_ifname
+      - live_route_vti_get.enabled | bool
+      - >-
+        live_route_vti_get.ipAddressAssignmentType
+        == 'BORROW_IP_FROM_INTERFACE'
+      - live_route_vti_get.borrowIPfrom.id == live_route_loopback_get.id
+      - live_route_vti_get.tunnelSource.id == route_endpoint.source_interface.id
+      - live_route_vti_get.securityZone.id == live_route_security_zone.id
+      - live_route_vti_get.ipsecMode == 'ipv4'
+
+- name: Store created route-based S2S interfaces
+  ansible.builtin.set_fact:
+    live_route_active_endpoints: >-
+      {{ live_route_active_endpoints
+         + [route_endpoint
+            | combine({
+                'loopback': live_route_loopback_get,
+                'vti': live_route_vti_get
+              })] }}

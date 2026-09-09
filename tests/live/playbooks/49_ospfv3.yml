@@ -1,0 +1,359 @@
+---
+- name: Validate deployed FMC OSPFv3 lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_phase: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PHASE') | default('build', true) }}"
+    fmcansible_routing_interface_name: "{{ lookup('env', 'FMCANSIBLE_ROUTING_INTERFACE') }}"
+  tasks:
+    - name: Validate OSPFv3 test inputs
+      ansible.builtin.assert:
+        that:
+          - routing_phase in ['build', 'cleanup']
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_interface_name | length > 0
+
+    - name: Discover routing context
+      ansible.builtin.include_tasks: ../tasks/dynamic_routing_context.yml
+
+    - name: Read OSPFv3 processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfv3PolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: ospfv3_existing
+
+    - name: Read OSPFv3 interface policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfv3InterfacePolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: ospfv3_interface_existing
+
+    - name: Select this test's OSPFv3 resources
+      ansible.builtin.set_fact:
+        ospfv3_matches: >-
+          {{ ospfv3_existing
+             | selectattr('processId', 'defined')
+             | selectattr('processId', 'equalto', 1)
+             | list }}
+        ospfv3_interface_matches: >-
+          {{ ospfv3_interface_existing
+             | selectattr('deviceInterface.id', 'defined')
+             | selectattr('deviceInterface.id', 'equalto', fmcansible_routing_interface.id)
+             | list }}
+
+    - name: Refuse duplicate OSPFv3 test resources
+      ansible.builtin.assert:
+        that:
+          - ospfv3_matches | length <= 1
+          - ospfv3_interface_matches | length <= 1
+
+    - name: Build and verify OSPFv3 configuration
+      when: routing_phase == 'build'
+      block:
+        - name: Determine whether outside needs IPv6
+          ansible.builtin.set_fact:
+            ospfv3_interface_needs_ipv6: >-
+              {{ not (
+                   (fmcansible_routing_interface.ipv6.enableIPV6 | default(false) | bool)
+                   and fmcansible_routing_interface.ipv6.linkLocalAddress | default('') == 'fe80::11'
+                   and fmcansible_routing_ftd_ipv6_address in
+                       (fmcansible_routing_interface.ipv6.addresses | default([])
+                        | map(attribute='address', default='') | list)
+                 ) }}
+
+        - name: Enable IPv6 on the routing interface
+          cisco.fmcansible.fmc_configuration:
+            operation: updateFTDPhysicalInterface
+            data:
+              type: PhysicalInterface
+              id: "{{ fmcansible_routing_interface.id }}"
+              name: "{{ fmcansible_routing_interface.name }}"
+              mode: "{{ fmcansible_routing_interface.mode }}"
+              enabled: true
+              ifname: "{{ fmcansible_routing_interface.ifname }}"
+              description: "{{ fmcansible_routing_interface.description | default('Dedicated FMCAnsible routing CI egress') }}"
+              MTU: "{{ fmcansible_routing_interface.MTU }}"
+              priority: "{{ fmcansible_routing_interface.priority | default(0) }}"
+              managementOnly: false
+              nveOnly: false
+              enableSGTPropagate: false
+              securityZone:
+                id: "{{ fmcansible_routing_interface.securityZone.id }}"
+                type: SecurityZone
+              ipv4:
+                static:
+                  address: "{{ fmcansible_routing_interface.ipv4.static.address }}"
+                  netmask: "{{ fmcansible_routing_interface.ipv4.static.netmask | string }}"
+              ipv6:
+                enableIPV6: true
+                enableAutoConfig: false
+                enableDHCPAddrConfig: false
+                enableDHCPNonAddrConfig: false
+                enableRA: false
+                linkLocalAddress: fe80::11
+                addresses:
+                  - address: "{{ fmcansible_routing_ftd_ipv6_address }}"
+                    prefix: "{{ fmcansible_routing_ipv6_prefix }}"
+                    enforceEUI64: false
+              pathMonitoring:
+                enable: false
+              applicationMonitoring:
+                enable: true
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ fmcansible_routing_interface.id }}"
+          register: ospfv3_ipv6_update
+          when: ospfv3_interface_needs_ipv6 | bool
+
+        - name: Read back IPv6 routing interface
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ fmcansible_routing_interface.id }}"
+            register_as: ospfv3_interface_with_ipv6
+
+        - name: Assert exact IPv6 interface configuration persisted
+          ansible.builtin.assert:
+            that:
+              - ospfv3_interface_with_ipv6.ipv6.enableIPV6 | bool
+              - ospfv3_interface_with_ipv6.ipv6.linkLocalAddress == 'fe80::11'
+              - ospfv3_interface_with_ipv6.ipv6.addresses | length == 1
+              - >-
+                ospfv3_interface_with_ipv6.ipv6.addresses[0].address
+                == fmcansible_routing_ftd_ipv6_address
+              - >-
+                ospfv3_interface_with_ipv6.ipv6.addresses[0].prefix
+                == fmcansible_routing_ipv6_prefix
+
+        - name: Deploy IPv6 interface prerequisite
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} enable IPv6 for OSPFv3"
+          when: ospfv3_ipv6_update.changed | default(false) | bool
+
+        - name: Create or verify OSPFv3 process
+          cisco.fmcansible.fmc_configuration:
+            operation: createOspfv3PolicyModel
+            data:
+              type: ospfv3policy
+              processId: 1
+              enableOspfv3: true
+              ospfv3Role: abr and asbr
+              areas:
+                - areaId: '0'
+                  areaType:
+                    type: normal
+                  defaultCost: 10
+              processConfiguration:
+                routerId: AUTOMATIC
+                ignoreLsaMospf: true
+                administrativeDistance:
+                  external: 110
+                  interArea: 110
+                  intraArea: 110
+                logAdjacencyChanges:
+                  includeDetails: false
+                timers:
+                  floodPacing: 33
+                  lsaArrival: 1000
+                  lsaGroup: 240
+                  retransmission: 66
+                  lsaThrottleTimer:
+                    initialDelay: 5
+                    minimumDelay: 10
+                    maximumDelay: 15
+                  spfThrottleTimer:
+                    initialDelay: 20
+                    minimumHoldTime: 25
+                    maximumWaitTime: 30
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospfv3_created
+          register: ospfv3_result
+
+        - name: Create or verify OSPFv3 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createOspfv3InterfacePolicyModel
+            data:
+              type: ospfv3interface
+              areaId: '0'
+              instance: 0
+              processId: 1
+              authentication:
+                type: AREA
+              deviceInterface:
+                id: "{{ fmcansible_routing_interface.id }}"
+                name: "{{ fmcansible_routing_interface.name }}"
+                type: PhysicalInterface
+              properties:
+                enableBFD: false
+                enableOspfv3ForIntf: true
+                filterOutgoingLSA: false
+                floodReduction: false
+                helloInterval: 10
+                deadInterval: 40
+                ignoreMtuMismatch: false
+                packetCost: 10
+                priority: 1
+                ptpNonBroadcast: false
+                retransmitInterval: 5
+                transmitDelay: 1
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospfv3_interface_created
+          register: ospfv3_interface_result
+
+        - name: Read back OSPFv3 process
+          cisco.fmcansible.fmc_configuration:
+            operation: getOspfv3PolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospfv3_created.id }}"
+            register_as: ospfv3_readback
+
+        - name: Read back OSPFv3 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getOspfv3InterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospfv3_interface_created.id }}"
+            register_as: ospfv3_interface_readback
+
+        - name: Assert exact OSPFv3 configuration persisted
+          ansible.builtin.assert:
+            that:
+              - ospfv3_readback.processId == 1
+              - ospfv3_readback.enableOspfv3 | bool
+              - ospfv3_readback.areas | length == 1
+              - ospfv3_readback.areas[0].areaId == '0'
+              - ospfv3_readback.processConfiguration.routerId == 'AUTOMATIC'
+              - ospfv3_interface_readback.deviceInterface.id == fmcansible_routing_interface.id
+              - ospfv3_interface_readback.processId == 1
+              - ospfv3_interface_readback.instance == 0
+              - ospfv3_interface_readback.areaId == '0'
+              - ospfv3_interface_readback.properties.enableOspfv3ForIntf | bool
+              - not (ospfv3_interface_readback.properties.ptpNonBroadcast | bool)
+              - ospfv3_interface_readback.authentication.type == 'AREA'
+
+        - name: Deploy OSPFv3 configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} configure OSPFv3"
+          when: >-
+            (ospfv3_result.changed | bool)
+            or (ospfv3_interface_result.changed | bool)
+
+    - name: Remove and verify OSPFv3 configuration
+      when: routing_phase == 'cleanup'
+      block:
+        - name: Delete OSPFv3 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteOspfv3InterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospfv3_interface_matches[0].id }}"
+          when: ospfv3_interface_matches | length == 1
+
+        - name: Delete OSPFv3 process
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteOspfv3PolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospfv3_matches[0].id }}"
+          when: ospfv3_matches | length == 1
+
+        - name: Restore routing interface IPv6 baseline
+          cisco.fmcansible.fmc_configuration:
+            operation: updateFTDPhysicalInterface
+            data:
+              type: PhysicalInterface
+              id: "{{ fmcansible_routing_interface.id }}"
+              name: "{{ fmcansible_routing_interface.name }}"
+              mode: "{{ fmcansible_routing_interface.mode }}"
+              enabled: true
+              ifname: "{{ fmcansible_routing_interface.ifname }}"
+              description: "{{ fmcansible_routing_interface.description | default('Dedicated FMCAnsible routing CI egress') }}"
+              MTU: "{{ fmcansible_routing_interface.MTU }}"
+              priority: "{{ fmcansible_routing_interface.priority | default(0) }}"
+              managementOnly: false
+              nveOnly: false
+              enableSGTPropagate: false
+              securityZone:
+                id: "{{ fmcansible_routing_interface.securityZone.id }}"
+                type: SecurityZone
+              ipv4:
+                static:
+                  address: "{{ fmcansible_routing_interface.ipv4.static.address }}"
+                  netmask: "{{ fmcansible_routing_interface.ipv4.static.netmask | string }}"
+              ipv6:
+                enableIPV6: false
+              pathMonitoring:
+                enable: false
+              applicationMonitoring:
+                enable: true
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ fmcansible_routing_interface.id }}"
+          when: fmcansible_routing_interface.ipv6.enableIPV6 | default(false) | bool
+
+        - name: Deploy OSPFv3 cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} remove OSPFv3"
+          when: >-
+            ospfv3_interface_matches | length == 1
+            or ospfv3_matches | length == 1
+            or (fmcansible_routing_interface.ipv6.enableIPV6 | default(false) | bool)
+
+        - name: Read OSPFv3 processes after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfv3PolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospfv3_after_cleanup
+
+        - name: Read OSPFv3 interface policies after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfv3InterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospfv3_interface_after_cleanup
+
+        - name: Read interface after OSPFv3 cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ fmcansible_routing_interface.id }}"
+            register_as: ospfv3_interface_after_cleanup_readback
+
+        - name: Assert OSPFv3 resources were removed
+          ansible.builtin.assert:
+            that:
+              - 1 not in (ospfv3_after_cleanup | map(attribute='processId', default=0) | list)
+              - fmcansible_routing_interface.id not in (ospfv3_interface_after_cleanup | map(attribute='deviceInterface.id', default='') | list)
+              - not (ospfv3_interface_after_cleanup_readback.ipv6.enableIPV6 | default(false) | bool)

@@ -1,0 +1,240 @@
+---
+- name: Validate physical interface configuration fields
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled interface configuration test
+      ansible.builtin.debug:
+        msg: "Physical interface configuration test is disabled."
+      when: not fmcansible_run_interface_tests | bool
+
+    - name: Test physical interface fields transactionally
+      when: fmcansible_run_interface_tests | bool
+      block:
+        - name: Validate dedicated interface test inputs
+          ansible.builtin.assert:
+            that:
+              - fmcansible_interface_test_device_name | length > 0
+              - fmcansible_interface_test_name | length > 0
+              - fmcansible_interface_test_cases | length > 0
+            fail_msg: >-
+              Supply a dedicated managed device and disabled physical
+              interface through private Jenkins variables.
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_interface_domains
+
+        - name: Store interface test domain UUID
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_interface_domains[fmcansible_domain_index].uuid }}
+            fmcansible_interface_test_results: []
+
+        - name: Get managed devices
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_interface_devices
+
+        - name: Select interface test device
+          ansible.builtin.set_fact:
+            fmcansible_interface_device_matches: >-
+              {{ (live_interface_devices | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_interface_test_device_name)
+                 | list }}
+
+        - name: Require exactly one interface test device
+          ansible.builtin.assert:
+            that:
+              - fmcansible_interface_device_matches | length == 1
+
+        - name: Store interface test device
+          ansible.builtin.set_fact:
+            fmcansible_interface_device: >-
+              {{ fmcansible_interface_device_matches[0] }}
+
+        - name: Get physical interfaces
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_interface_device.id }}"
+            register_as: live_interface_physical_interfaces
+
+        - name: Select dedicated physical interface
+          ansible.builtin.set_fact:
+            fmcansible_interface_matches: >-
+              {{ (((live_interface_physical_interfaces | default([]))
+                   | selectattr('name', 'defined')
+                   | selectattr('name', 'equalto',
+                                fmcansible_interface_test_name)
+                   | list)
+                  + ((live_interface_physical_interfaces | default([]))
+                     | selectattr('ifname', 'defined')
+                     | selectattr('ifname', 'equalto',
+                                  fmcansible_interface_test_name)
+                     | list))
+                 | unique(attribute='id')
+                 | list }}
+
+        - name: Require one dedicated physical interface
+          ansible.builtin.assert:
+            that:
+              - fmcansible_interface_matches | length == 1
+            fail_msg: >-
+              Interface field tests can interrupt traffic. The selected
+              interface must be unique and dedicated to CI.
+
+        - name: Read complete physical interface configuration
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_interface_device.id }}"
+              objectId: "{{ fmcansible_interface_matches[0].id }}"
+            register_as: live_interface_original
+
+        - name: Require a disabled dedicated physical interface
+          ansible.builtin.assert:
+            that:
+              - not live_interface_original.enabled | default(false) | bool
+            fail_msg: >-
+              Interface field tests can interrupt traffic. The selected
+              interface must be disabled and dedicated to CI.
+
+        - name: Store original physical interface
+          ansible.builtin.set_fact:
+            fmcansible_interface_original: "{{ live_interface_original }}"
+            fmcansible_interface_writable_original: >-
+              {{ live_interface_original
+                 | dict2items
+                 | rejectattr(
+                     'key',
+                     'in',
+                     ['activeMACAddress', 'links', 'metadata', 'version']
+                 )
+                 | items2dict }}
+
+        - name: Configure temporary named interface baseline
+          cisco.fmcansible.fmc_configuration:
+            operation: updateFTDPhysicalInterface
+            data: >-
+              {{ fmcansible_interface_writable_original
+                 | combine({
+                     'enabled': false,
+                     'ifname': 'ci-if-'
+                       + (fmcansible_run_id | hash('sha1'))[:16],
+                     'mode': 'NONE'
+                   }) }}
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_interface_device.id }}"
+              objectId: "{{ fmcansible_interface_original.id }}"
+            register_as: live_interface_baseline
+
+        - name: Read back temporary named interface baseline
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_interface_device.id }}"
+              objectId: "{{ fmcansible_interface_original.id }}"
+            register_as: live_interface_baseline_get
+
+        - name: Assert temporary named interface baseline persisted
+          ansible.builtin.assert:
+            that:
+              - live_interface_baseline_get.id == fmcansible_interface_original.id
+              - not live_interface_baseline_get.enabled | bool
+              - >-
+                live_interface_baseline_get.ifname
+                == 'ci-if-' + (fmcansible_run_id | hash('sha1'))[:16]
+              - live_interface_baseline_get.mode == 'NONE'
+
+        - name: Store writable interface baseline
+          ansible.builtin.set_fact:
+            fmcansible_interface_writable_baseline: >-
+              {{ live_interface_baseline_get
+                 | dict2items
+                 | rejectattr(
+                     'key',
+                     'in',
+                     ['activeMACAddress', 'links', 'metadata', 'version']
+                   )
+                 | items2dict }}
+
+        - name: Test individual interface fields
+          ansible.builtin.include_tasks: ../tasks/test_interface_field.yml
+          loop: "{{ fmcansible_interface_test_cases }}"
+          loop_control:
+            loop_var: fmcansible_interface_test_case
+            label: "{{ fmcansible_interface_test_case.field }}"
+
+        - name: Read interface after all restores
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_interface_device.id }}"
+              objectId: "{{ fmcansible_interface_original.id }}"
+            register_as: live_interface_after_restore
+
+        - name: Verify interface remained disabled after all restores
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_interface_after_restore.enabled
+                == fmcansible_interface_original.enabled
+              - >-
+                (live_interface_after_restore.ifname | default(none))
+                == (fmcansible_interface_original.ifname | default(none))
+
+        - name: Verify interface fields after all restores
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_interface_after_restore[
+                  fmcansible_interface_test_case.field
+                ]
+                == fmcansible_interface_original[
+                  fmcansible_interface_test_case.field
+                ]
+            fail_msg: >-
+              Restore verification failed for
+              {{ fmcansible_interface_test_case.field }}.
+          loop: "{{ fmcansible_interface_test_cases }}"
+          loop_control:
+            loop_var: fmcansible_interface_test_case
+            label: "{{ fmcansible_interface_test_case.field }}"
+          when:
+            - >-
+              fmcansible_interface_test_case.field
+              in fmcansible_interface_original
+
+        - name: Report interface field acceptance
+          ansible.builtin.debug:
+            var: fmcansible_interface_test_results
+
+        - name: Find failed required interface capabilities
+          ansible.builtin.set_fact:
+            fmcansible_required_interface_failures: >-
+              {{ fmcansible_interface_test_results
+                 | selectattr('required', 'equalto', true)
+                 | rejectattr('status', 'equalto', 'persisted')
+                 | list }}
+
+        - name: Require core interface capabilities
+          ansible.builtin.assert:
+            that:
+              - fmcansible_required_interface_failures | length == 0
+            fail_msg: >-
+              Required interface capabilities failed:
+              {{ fmcansible_required_interface_failures | to_json }}.

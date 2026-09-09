@@ -1,0 +1,142 @@
+---
+- name: Get RA VPNs for named cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_name }}"
+    register_as: cleanup_named_ra_vpns
+
+- name: Select exact RA VPNs for named cleanup
+  ansible.builtin.set_fact:
+    fmcansible_named_ra_vpns: >-
+      {{ (cleanup_named_ra_vpns | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', fmcansible_ravpn_name)
+         | list }}
+
+- name: Delete named RA VPNs and connection profiles
+  ansible.builtin.include_tasks: cleanup_ra_vpn.yml
+  loop: "{{ fmcansible_named_ra_vpns }}"
+  loop_control:
+    loop_var: stale_ra_vpn
+    label: "{{ stale_ra_vpn.name }}"
+
+- name: Get group policies for named cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllGroupPolicyModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_group_policy_name }}"
+    register_as: cleanup_named_group_policies
+
+- name: Delete named group policies
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteGroupPolicyModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_named_group_policy.id }}"
+  loop: >-
+    {{ (cleanup_named_group_policies | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_group_policy_name)
+       | list }}
+  loop_control:
+    loop_var: cleanup_named_group_policy
+    label: "{{ cleanup_named_group_policy.name }}"
+
+- name: Get IPv4 address pools for named cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_pool_name }}"
+    register_as: cleanup_named_ipv4_pools
+
+- name: Delete named IPv4 address pools
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteIPv4AddressPool
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_named_ipv4_pool.id }}"
+  loop: >-
+    {{ (cleanup_named_ipv4_pools | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_pool_name)
+       | list }}
+  loop_control:
+    loop_var: cleanup_named_ipv4_pool
+    label: "{{ cleanup_named_ipv4_pool.name }}"
+
+- name: Get dynamic access policies for named cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_dap_name }}"
+    register_as: cleanup_named_dap_policies
+
+- name: Delete named dynamic access policies
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_named_dap_policy.id }}"
+  loop: >-
+    {{ (cleanup_named_dap_policies | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_dap_name)
+       | list }}
+  loop_control:
+    loop_var: cleanup_named_dap_policy
+    label: "{{ cleanup_named_dap_policy.name }}"
+
+- name: Re-read named group policies after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllGroupPolicyModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_group_policy_name }}"
+    register_as: cleanup_named_group_policies_after
+
+- name: Re-read named IPv4 address pools after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_pool_name }}"
+    register_as: cleanup_named_ipv4_pools_after
+
+- name: Re-read named dynamic access policies after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_dap_name }}"
+    register_as: cleanup_named_dap_policies_after
+
+- name: Assert named RA VPN dependencies were removed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cleanup_named_group_policies_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_group_policy_name)
+        | list
+        | length == 0
+      - >-
+        (cleanup_named_ipv4_pools_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_pool_name)
+        | list
+        | length == 0
+      - >-
+        (cleanup_named_dap_policies_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_dap_name)
+        | list
+        | length == 0

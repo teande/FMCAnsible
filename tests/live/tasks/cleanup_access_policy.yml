@@ -1,0 +1,40 @@
+---
+- name: Get rules from stale access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllAccessRule
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_access_policy.id }}"
+    register_as: stale_access_rules
+
+- name: Delete rules from stale access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteAccessRule
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_access_policy.id }}"
+      objectId: "{{ stale_access_rule.id }}"
+  loop: "{{ stale_access_rules | default([]) }}"
+  loop_control:
+    loop_var: stale_access_rule
+    label: "{{ stale_access_rule.name | default(stale_access_rule.id) }}"
+
+- name: Re-read rules after access policy rule cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllAccessRule
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_access_policy.id }}"
+    register_as: stale_access_rules_after_cleanup
+
+- name: Assert access policy rules were removed
+  ansible.builtin.assert:
+    that:
+      - (stale_access_rules_after_cleanup | default([])) | length == 0
+
+- name: Delete stale access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_access_policy.id }}"

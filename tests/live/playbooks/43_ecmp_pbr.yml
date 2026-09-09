@@ -1,0 +1,461 @@
+---
+- name: Validate ECMP and policy-based routing lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Validate ECMP and PBR test inputs
+      ansible.builtin.assert:
+        that:
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_ecmp_interfaces | length >= 2
+          - fmcansible_routing_pbr_ingress_interface | length > 0
+          - fmcansible_routing_pbr_egress_interfaces | length > 0
+          - >-
+            fmcansible_routing_pbr_ingress_interface
+            not in fmcansible_routing_pbr_egress_interfaces
+        fail_msg: >-
+          ECMP needs at least two egress interfaces. PBR needs one separate
+          ingress interface and at least one egress interface.
+
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_routing_policy_domains
+
+    - name: Initialize ECMP and PBR facts
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_routing_policy_domains[fmcansible_domain_index].uuid }}
+        live_routing_ecmp_id: null
+        live_routing_acl_id: null
+        live_routing_pbr_id: null
+
+    - name: Get managed devices once
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_policy_devices
+
+    - name: Select exact routing test device
+      ansible.builtin.set_fact:
+        live_routing_policy_device_matches: >-
+          {{ (live_routing_policy_devices | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto',
+                          fmcansible_routing_test_device_name)
+             | list }}
+
+    - name: Require exactly one routing test device
+      ansible.builtin.assert:
+        that:
+          - live_routing_policy_device_matches | length == 1
+
+    - name: Store routing test device
+      ansible.builtin.set_fact:
+        fmcansible_routing_device: >-
+          {{ live_routing_policy_device_matches[0] }}
+
+    - name: Get physical interfaces once
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: live_routing_policy_interfaces
+
+    - name: Select ECMP interfaces
+      ansible.builtin.set_fact:
+        live_routing_ecmp_interface_matches: >-
+          {{ (((live_routing_policy_interfaces | default([]))
+               | selectattr('name', 'defined')
+               | selectattr('name', 'in',
+                            fmcansible_routing_ecmp_interfaces)
+               | list)
+              + ((live_routing_policy_interfaces | default([]))
+                 | selectattr('ifname', 'defined')
+                 | selectattr('ifname', 'in',
+                              fmcansible_routing_ecmp_interfaces)
+                 | list))
+             | unique(attribute='id') | list }}
+
+    - name: Select PBR ingress interface
+      ansible.builtin.set_fact:
+        live_routing_pbr_ingress_matches: >-
+          {{ (((live_routing_policy_interfaces | default([]))
+               | selectattr('name', 'defined')
+               | selectattr('name', 'equalto',
+                            fmcansible_routing_pbr_ingress_interface)
+               | list)
+              + ((live_routing_policy_interfaces | default([]))
+                 | selectattr('ifname', 'defined')
+                 | selectattr('ifname', 'equalto',
+                              fmcansible_routing_pbr_ingress_interface)
+                 | list))
+             | unique(attribute='id') | list }}
+
+    - name: Select PBR egress interfaces
+      ansible.builtin.set_fact:
+        live_routing_pbr_egress_matches: >-
+          {{ (((live_routing_policy_interfaces | default([]))
+               | selectattr('name', 'defined')
+               | selectattr('name', 'in',
+                            fmcansible_routing_pbr_egress_interfaces)
+               | list)
+              + ((live_routing_policy_interfaces | default([]))
+                 | selectattr('ifname', 'defined')
+                 | selectattr('ifname', 'in',
+                              fmcansible_routing_pbr_egress_interfaces)
+                 | list))
+             | unique(attribute='id') | list }}
+
+    - name: Require every selected routing interface
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_routing_ecmp_interface_matches | length
+            == fmcansible_routing_ecmp_interfaces | length
+          - live_routing_pbr_ingress_matches | length == 1
+          - >-
+            live_routing_pbr_egress_matches | length
+            == fmcansible_routing_pbr_egress_interfaces | length
+        fail_msg: >-
+          The dedicated routing device does not expose every requested ECMP
+          and PBR interface by physical name or logical interface name.
+
+    - name: Build minimal physical interface references
+      ansible.builtin.set_fact:
+        live_routing_ecmp_interface_refs: >-
+          {{ (live_routing_ecmp_interface_refs | default([]))
+             + [{'id': routing_interface.id,
+                 'name': routing_interface.name,
+                 'type': 'PhysicalInterface'}] }}
+      loop: "{{ live_routing_ecmp_interface_matches }}"
+      loop_control:
+        loop_var: routing_interface
+        label: "{{ routing_interface.ifname | default(routing_interface.name) }}"
+
+    - name: Build PBR egress interface references
+      ansible.builtin.set_fact:
+        live_routing_pbr_egress_refs: >-
+          {{ (live_routing_pbr_egress_refs | default([]))
+             + [{'id': routing_interface.id,
+                 'name': routing_interface.name,
+                 'type': 'PhysicalInterface'}] }}
+      loop: "{{ live_routing_pbr_egress_matches }}"
+      loop_control:
+        loop_var: routing_interface
+        label: "{{ routing_interface.ifname | default(routing_interface.name) }}"
+
+    - name: Store PBR ingress interface reference
+      ansible.builtin.set_fact:
+        live_routing_pbr_ingress_ref:
+          id: "{{ live_routing_pbr_ingress_matches[0].id }}"
+          name: "{{ live_routing_pbr_ingress_matches[0].name }}"
+          type: PhysicalInterface
+
+    - name: Create, verify, update, and remove ECMP and PBR
+      block:
+        - name: Create ECMP zone
+          cisco.fmcansible.fmc_configuration:
+            operation: createECMPZoneModel
+            data:
+              name: "{{ fmcansible_routing_ecmp_name }}"
+              description: "{{ fmcansible_live_prefix }} initial ECMP"
+              interfaces: "{{ live_routing_ecmp_interface_refs }}"
+              type: ecmpzones
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ecmp
+
+        - name: Track ECMP zone
+          ansible.builtin.set_fact:
+            live_routing_ecmp_id: "{{ live_routing_ecmp.id }}"
+
+        - name: Read back created ECMP zone
+          cisco.fmcansible.fmc_configuration:
+            operation: getECMPZoneModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ecmp_id }}"
+            register_as: live_routing_ecmp_get
+
+        - name: Assert ECMP zone persisted
+          ansible.builtin.assert:
+            that:
+              - live_routing_ecmp_get.id == live_routing_ecmp_id
+              - live_routing_ecmp_get.name == fmcansible_routing_ecmp_name
+              - >-
+                (live_routing_ecmp_get.interfaces | map(attribute='id') | sort)
+                ==
+                (live_routing_ecmp_interface_refs
+                 | map(attribute='id') | sort)
+
+        - name: Update ECMP zone description
+          cisco.fmcansible.fmc_configuration:
+            operation: updateECMPZoneModel
+            data:
+              id: "{{ live_routing_ecmp_id }}"
+              name: "{{ fmcansible_routing_ecmp_name }}"
+              description: "{{ fmcansible_live_prefix }} updated ECMP"
+              interfaces: "{{ live_routing_ecmp_interface_refs }}"
+              type: ecmpzones
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ecmp_id }}"
+
+        - name: Read back updated ECMP zone
+          cisco.fmcansible.fmc_configuration:
+            operation: getECMPZoneModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ecmp_id }}"
+            register_as: live_routing_ecmp_updated
+
+        - name: Assert ECMP update persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_routing_ecmp_updated.description
+                == fmcansible_live_prefix ~ ' updated ECMP'
+
+        - name: Deploy ECMP configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} configure ECMP
+          when: fmcansible_routing_policy_deploy | bool
+
+        - name: Create PBR match ACL
+          cisco.fmcansible.fmc_configuration:
+            operation: createExtendedAccessListModel
+            data:
+              name: "{{ fmcansible_routing_pbr_acl_name }}"
+              description: "{{ fmcansible_live_prefix }} PBR match"
+              entries:
+                - action: PERMIT
+                  logging: DISABLED
+                  logLevel: INFORMATIONAL
+              overridable: false
+              type: ExtendedAccessList
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_routing_pbr_acl
+
+        - name: Track PBR match ACL
+          ansible.builtin.set_fact:
+            live_routing_acl_id: "{{ live_routing_pbr_acl.id }}"
+
+        - name: Read back PBR match ACL
+          cisco.fmcansible.fmc_configuration:
+            operation: getExtendedAccessListModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ live_routing_acl_id }}"
+            register_as: live_routing_pbr_acl_get
+
+        - name: Assert PBR match ACL persisted
+          ansible.builtin.assert:
+            that:
+              - live_routing_pbr_acl_get.id == live_routing_acl_id
+              - >-
+                live_routing_pbr_acl_get.name
+                == fmcansible_routing_pbr_acl_name
+              - live_routing_pbr_acl_get.entries | length == 1
+              - live_routing_pbr_acl_get.entries[0].action == 'PERMIT'
+
+        - name: Create PBR policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultiplePBRPolicyModel
+            data:
+              ingressInterfaces:
+                - "{{ live_routing_pbr_ingress_ref }}"
+              forwardingActions:
+                - forwardingActionType: SET_EGRESS_INTF_BY_PRIORITY
+                  egressInterfaces: "{{ live_routing_pbr_egress_refs }}"
+                  matchCriteria:
+                    id: "{{ live_routing_acl_id }}"
+                    name: "{{ fmcansible_routing_pbr_acl_name }}"
+                    type: ExtendedAccessList
+              type: PolicyBasedRoutes
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            query_params:
+              bulk: false
+            register_as: live_routing_pbr
+
+        - name: Track PBR policy
+          ansible.builtin.set_fact:
+            live_routing_pbr_id: "{{ live_routing_pbr.id }}"
+
+        - name: Read back created PBR policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getPBRPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_pbr_id }}"
+            register_as: live_routing_pbr_get
+
+        - name: Assert PBR policy persisted
+          ansible.builtin.assert:
+            that:
+              - live_routing_pbr_get.id == live_routing_pbr_id
+              - >-
+                live_routing_pbr_get.ingressInterfaces[0].id
+                == live_routing_pbr_ingress_ref.id
+              - >-
+                live_routing_pbr_get.forwardingActions[0].matchCriteria.id
+                == live_routing_acl_id
+              - >-
+                (live_routing_pbr_get.forwardingActions[0].egressInterfaces
+                 | map(attribute='id') | sort)
+                ==
+                (live_routing_pbr_egress_refs | map(attribute='id') | sort)
+              - >-
+                live_routing_pbr_get.forwardingActions[0]
+                .forwardingActionType == 'SET_EGRESS_INTF_BY_PRIORITY'
+
+        - name: Update PBR forwarding order
+          cisco.fmcansible.fmc_configuration:
+            operation: updatePBRPolicyModel
+            data:
+              id: "{{ live_routing_pbr_id }}"
+              ingressInterfaces:
+                - "{{ live_routing_pbr_ingress_ref }}"
+              forwardingActions:
+                - forwardingActionType: SET_EGRESS_INTF_BY_ORDER
+                  egressInterfaces: "{{ live_routing_pbr_egress_refs }}"
+                  matchCriteria:
+                    id: "{{ live_routing_acl_id }}"
+                    name: "{{ fmcansible_routing_pbr_acl_name }}"
+                    type: ExtendedAccessList
+              type: PolicyBasedRoutes
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_pbr_id }}"
+
+        - name: Read back updated PBR policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getPBRPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_pbr_id }}"
+            register_as: live_routing_pbr_updated
+
+        - name: Assert PBR update persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_routing_pbr_updated.forwardingActions[0]
+                .forwardingActionType == 'SET_EGRESS_INTF_BY_ORDER'
+              - >-
+                live_routing_pbr_updated.forwardingActions[0].matchCriteria.id
+                == live_routing_acl_id
+
+        - name: Deploy PBR configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} configure PBR
+          when: fmcansible_routing_policy_deploy | bool
+
+      always:
+        - name: Delete PBR policy
+          cisco.fmcansible.fmc_configuration:
+            operation: deletePBRPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_pbr_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - live_routing_pbr_id is not none
+
+        - name: Delete PBR match ACL
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteExtendedAccessListModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ live_routing_acl_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - live_routing_acl_id is not none
+
+        - name: Delete ECMP zone
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteECMPZoneModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ecmp_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - live_routing_ecmp_id is not none
+
+        - name: Deploy ECMP and PBR cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} remove ECMP and PBR
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - fmcansible_routing_policy_deploy | bool
+            - >-
+              live_routing_ecmp_id is not none
+              or live_routing_pbr_id is not none
+
+    - name: Read ECMP zones after cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllECMPZoneModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        register_as: live_routing_ecmp_after_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Read PBR policies after cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllPBRPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        register_as: live_routing_pbr_after_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Read extended ACLs after cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllExtendedAccessListModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_acls_after_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Assert ECMP and PBR resources were removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_routing_ecmp_id not in
+            (live_routing_ecmp_after_cleanup | default([])
+             | map(attribute='id') | list)
+          - >-
+            live_routing_pbr_id not in
+            (live_routing_pbr_after_cleanup | default([])
+             | map(attribute='id') | list)
+          - >-
+            live_routing_acl_id not in
+            (live_routing_acls_after_cleanup | default([])
+             | map(attribute='id') | list)
+      when: fmcansible_cleanup_after_test | bool

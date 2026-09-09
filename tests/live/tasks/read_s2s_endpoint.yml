@@ -1,0 +1,14 @@
+---
+- name: Read complete S2S endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: getVpnEndpoint
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ live_s2s_container_uuid }}"
+      objectId: "{{ live_s2s_endpoint_summary.id }}"
+    register_as: live_s2s_complete_endpoint
+
+- name: Store complete S2S endpoint
+  ansible.builtin.set_fact:
+    live_s2s_complete_endpoints: >-
+      {{ live_s2s_complete_endpoints + [live_s2s_complete_endpoint] }}

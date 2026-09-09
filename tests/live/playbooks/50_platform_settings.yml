@@ -1,0 +1,171 @@
+---
+- name: Validate FTD Platform Settings policy and configuration APIs
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Initialize Platform Settings test state
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+        fmcansible_created_platform_policy: {}
+        fmcansible_platform_settings_report: {}
+
+    - name: Create, validate, and clean up Platform Settings
+      when: fmcansible_run_platform_settings_tests | bool
+      block:
+        - name: Create temporary FTD Platform Settings policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createFTDPlatformSettingsPolicy
+            data:
+              type: FTDPlatformSettingsPolicy
+              name: "{{ fmcansible_platform_policy_name }}"
+              description: "{{ fmcansible_live_prefix }}"
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_platform_policy
+
+        - name: Track temporary Platform Settings policy
+          ansible.builtin.set_fact:
+            fmcansible_created_platform_policy: "{{ live_platform_policy }}"
+
+        - name: Read back FTD Platform Settings policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getFTDPlatformSettingsPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_platform_policy.id }}"
+            register_as: live_platform_policy_get
+
+        - name: Assert FTD Platform Settings policy persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_platform_policy_get.id
+                == fmcansible_created_platform_policy.id
+              - live_platform_policy_get.name == fmcansible_platform_policy_name
+              - live_platform_policy_get.type == 'FTDPlatformSettingsPolicy'
+              - live_platform_policy_get.description == fmcansible_live_prefix
+
+        - name: Probe declared Platform Settings configuration families
+          ansible.builtin.include_tasks: ../tasks/probe_operation.yml
+          loop: "{{ fmcansible_platform_settings_probes }}"
+          loop_control:
+            loop_var: fmcansible_probe
+            label: "{{ fmcansible_probe.key }}"
+          vars:
+            fmcansible_probe_path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_platform_policy.id }}"
+            fmcansible_probe_report_fact: fmcansible_platform_settings_report
+          when: fmcansible_target in fmcansible_probe.targets
+
+        - name: Find required Platform Settings probe failures
+          ansible.builtin.set_fact:
+            fmcansible_required_platform_setting_failures: >-
+              {{
+                fmcansible_platform_settings_report
+                | dict2items
+                | selectattr('value.required', 'equalto', true)
+                | rejectattr('value.status', 'equalto', 'accepted')
+                | map(attribute='key')
+                | list
+              }}
+
+        - name: Assert required Platform Settings APIs are accepted
+          ansible.builtin.assert:
+            that:
+              - fmcansible_required_platform_setting_failures | length == 0
+            fail_msg: >-
+              Required Platform Settings APIs failed:
+              {{ fmcansible_required_platform_setting_failures }}.
+              Report={{ fmcansible_platform_settings_report }}
+
+        - name: Get login banner setting
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllLoginBannerSettingsPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_platform_policy.id }}"
+            register_as: live_login_banner_settings
+
+        - name: Assert login banner setting exists
+          ansible.builtin.assert:
+            that:
+              - live_login_banner_settings | length == 1
+
+        - name: Update login banner
+          cisco.fmcansible.fmc_configuration:
+            operation: updateLoginBannerSettingsPolicy
+            data:
+              id: "{{ live_login_banner_settings[0].id }}"
+              type: >-
+                {{
+                  live_login_banner_settings[0].type
+                  | default('BannerSetting')
+                }}
+              bannerText:
+                - "FMCAnsible CI validation"
+                - "{{ fmcansible_live_prefix }}"
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_platform_policy.id }}"
+              objectId: "{{ live_login_banner_settings[0].id }}"
+            register_as: live_login_banner_update
+
+        - name: Read back login banner
+          cisco.fmcansible.fmc_configuration:
+            operation: getLoginBannerSettingsPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_platform_policy.id }}"
+              objectId: "{{ live_login_banner_settings[0].id }}"
+            register_as: live_login_banner_get
+
+        - name: Assert login banner update persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_login_banner_get.bannerText
+                == ['FMCAnsible CI validation', fmcansible_live_prefix]
+
+        - name: Report Platform Settings API capabilities
+          ansible.builtin.debug:
+            var: fmcansible_platform_settings_report
+      always:
+        - name: Delete temporary FTD Platform Settings policy
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteFTDPlatformSettingsPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_platform_policy.id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - fmcansible_created_platform_policy.id is defined
+
+    - name: Verify Platform Settings policy was removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPlatformSettingsPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        filters:
+          name: "{{ fmcansible_platform_policy_name }}"
+        register_as: live_platform_policy_after_cleanup
+      when:
+        - fmcansible_run_platform_settings_tests | bool
+        - fmcansible_cleanup_after_test | bool
+
+    - name: Assert Platform Settings cleanup
+      ansible.builtin.assert:
+        that:
+          - (live_platform_policy_after_cleanup | default([])) | length == 0
+      when:
+        - fmcansible_run_platform_settings_tests | bool
+        - fmcansible_cleanup_after_test | bool

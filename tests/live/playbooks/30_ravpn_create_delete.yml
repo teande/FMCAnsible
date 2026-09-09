@@ -1,0 +1,1105 @@
+---
+- name: Validate RA VPN create and delete
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../vars/feature_matrix.yml
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled RA VPN test
+      ansible.builtin.debug:
+        msg: "RA VPN test is disabled."
+      when: not fmcansible_run_vpn_tests | bool
+
+    - name: Run RA VPN create, verify, and delete test
+      when: fmcansible_run_vpn_tests | bool
+      block:
+        - name: Require RA VPN API support
+          ansible.builtin.assert:
+            that:
+              - fmcansible_platform_matrix[fmcansible_target].ravpn_create_delete | bool
+            fail_msg: >-
+              RA VPN create/delete is not available for
+              fmcansible_target={{ fmcansible_target }}.
+
+        - name: Validate RA VPN lab inputs
+          ansible.builtin.assert:
+            that:
+              - fmcansible_ravpn_access_zone_name | length > 0
+              - fmcansible_ravpn_anyconnect_package_name | length > 0
+              - fmcansible_ravpn_client_os in ['WINDOWS', 'LINUX', 'MAC']
+              - fmcansible_ravpn_pool_range is
+                match('^[0-9.]+-[0-9.]+$')
+              - fmcansible_ravpn_ad_ca_path | length > 0
+              - fmcansible_ravpn_ad_bind_username | length > 0
+              - fmcansible_ravpn_ad_bind_password | length > 0
+              - fmcansible_ravpn_local_username | length > 0
+              - fmcansible_ravpn_local_password | length > 0
+              - fmcansible_ravpn_target_device_name | length > 0
+            fail_msg: >-
+              RA VPN testing requires an existing access security zone, a
+              preloaded Secure Client package, a supported client OS, and an
+              IPv4 pool range. Supply these through the private Jenkins vars.
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_ra_domains
+
+        - name: Store RA VPN test domain UUID
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_ra_domains[fmcansible_domain_index].uuid }}
+
+        - name: Get managed devices for RA VPN assignment
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            query_params:
+              expanded: true
+            register_as: live_ra_devices
+
+        - name: Select the RA VPN target device
+          ansible.builtin.set_fact:
+            fmcansible_ra_target_device_matches: >-
+              {{ (live_ra_devices | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_ravpn_target_device_name)
+                 | list }}
+
+        - name: Require one connected managed RA VPN target
+          ansible.builtin.assert:
+            that:
+              - fmcansible_ra_target_device_matches | length == 1
+              - fmcansible_ra_target_device_matches[0].isConnected | bool
+              - >-
+                fmcansible_ra_target_device_matches[0].managementState
+                == 'MANAGED'
+            fail_msg: >-
+              Expected one connected managed device named
+              {{ fmcansible_ravpn_target_device_name }}.
+
+        - name: Store the RA VPN target device
+          ansible.builtin.set_fact:
+            fmcansible_ra_target_device: >-
+              {{ fmcansible_ra_target_device_matches[0] }}
+
+        - name: Get the RA VPN target device license
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDeviceLicense
+            query_params:
+              expanded: true
+            register_as: live_ra_device_licenses
+
+        - name: Select the RA VPN target device license
+          ansible.builtin.set_fact:
+            fmcansible_ra_target_device_licenses: >-
+              {{ (live_ra_device_licenses | default([]))
+                 | selectattr('id', 'equalto',
+                              fmcansible_ra_target_device.id)
+                 | list }}
+
+        - name: Require a Secure Client license on the RAVPN target
+          ansible.builtin.assert:
+            that:
+              - fmcansible_ra_target_device_licenses | length == 1
+              - >-
+                fmcansible_ravpn_required_license in
+                (fmcansible_ra_target_device_licenses[0].licenseTypes
+                 | default([]))
+            fail_msg: >-
+              {{ fmcansible_ra_target_device.name }} requires
+              {{ fmcansible_ravpn_required_license }} before the RAVPN
+              deployment test can run.
+
+        - name: Get deployment state before the RA VPN test
+          cisco.fmcansible.fmc_configuration:
+            operation: getDeployableDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            query_params:
+              expanded: true
+            register_as: live_ra_deployable_before
+          when: fmcansible_ravpn_deploy | bool
+
+        - name: Require a clean RA VPN deployment baseline
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_ra_deployable_before | default([]))
+                | selectattr('device.id', 'equalto',
+                             fmcansible_ra_target_device.id)
+                | list
+                | length == 0
+            fail_msg: >-
+              {{ fmcansible_ra_target_device.name }} has pending changes before
+              the RAVPN test. Synchronize the dedicated CI baseline first.
+          when: fmcansible_ravpn_deploy | bool
+
+        - name: Clean up stale RAVPN certificate state from interrupted runs
+          ansible.builtin.include_tasks: >-
+            ../tasks/cleanup_ravpn_stale_certificates.yml
+
+        - name: Get RA VPN access security zones
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllSecurityZoneObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_ra_security_zones
+
+        - name: Get preloaded Secure Client packages
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllAnyConnectPackageModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_ra_client_packages
+
+        - name: Get IKEv2 policies for RA VPN
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIkev2PolicyObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_ra_ikev2_policies
+
+        - name: Select exact RA VPN prerequisites
+          ansible.builtin.set_fact:
+            fmcansible_ra_zone_matches: >-
+              {{ (live_ra_security_zones | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_ravpn_access_zone_name)
+                 | list }}
+            fmcansible_ra_package_matches: >-
+              {{ (live_ra_client_packages | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_ravpn_anyconnect_package_name)
+                 | list }}
+            fmcansible_ra_ikev2_matches: >-
+              {{ (live_ra_ikev2_policies | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_ravpn_ikev2_policy_name)
+                 | list }}
+
+        - name: Require unique RA VPN prerequisites
+          ansible.builtin.assert:
+            that:
+              - fmcansible_ra_zone_matches | length == 1
+              - fmcansible_ra_package_matches | length == 1
+              - fmcansible_ra_ikev2_matches | length == 1
+            fail_msg: >-
+              Expected one access zone named
+              {{ fmcansible_ravpn_access_zone_name }}, one Secure Client
+              package named {{ fmcansible_ravpn_anyconnect_package_name }},
+              and one IKEv2 policy named
+              {{ fmcansible_ravpn_ikev2_policy_name }}.
+
+        - name: Create, validate, and clean up RA VPN resources
+          block:
+            - name: Prepare local and AD RAVPN identity sources
+              ansible.builtin.include_tasks: ../tasks/prepare_ravpn_identity.yml
+
+            - name: Create self-signed RA VPN certificate enrollment
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnCertEnrollmentModel
+                data:
+                  validationUsage:
+                    ipsecClient: true
+                    sslClient: true
+                    sslServer: true
+                  skipCaFlagCheck: false
+                  enrollmentType: SELF_SIGNED_CERTFICATE
+                  certificateParameters:
+                    commonName: "{{ fmcansible_ravpn_certificate_common_name }}"
+                    organization: FMCAnsible CI
+                    organizationalUnit: Integration
+                    includeDeviceSerial: false
+                    includeFQDN: DEFAULT
+                  revocation:
+                    certRevocationListContent:
+                      enableCertRevocationList: false
+                      enableCertRevocationListDistributionPoint: false
+                      enableStaticCertRevocationList: false
+                    onlineCertificateStatusProtocolContent:
+                      enableOnlineCertificateStatusProtocol: false
+                    evaluationPriority: NONE
+                    ignoreRevocation: true
+                  key:
+                    ignoreIpsecKeyusage: false
+                    keyType: RSA
+                    keyName: <Default-RSA-Key>
+                    keySize: CertKey_2048
+                  type: CertEnrollment
+                  name: "{{ fmcansible_ravpn_certificate_name }}"
+                  overridable: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_certificate
+
+            - name: Read back RA VPN certificate enrollment
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnCertEnrollmentModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_certificate.id }}"
+                register_as: live_ra_certificate_get
+
+            - name: Assert RA VPN certificate enrollment persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_certificate_get.id == live_ra_certificate.id
+                  - >-
+                    live_ra_certificate_get.name
+                    == fmcansible_ravpn_certificate_name
+                  - live_ra_certificate_get.type == 'CertEnrollment'
+                  - >-
+                    live_ra_certificate_get.enrollmentType
+                    == 'SELF_SIGNED_CERTFICATE'
+                  - >-
+                    live_ra_certificate_get.certificateParameters.commonName
+                    == fmcansible_ravpn_certificate_common_name
+                  - live_ra_certificate_get.validationUsage.ipsecClient | bool
+                  - live_ra_certificate_get.validationUsage.sslClient | bool
+                  - live_ra_certificate_get.validationUsage.sslServer | bool
+
+            - name: Enroll the RA VPN trustpoint on the target FTD
+              cisco.fmcansible.fmc_configuration:
+                operation: createManageDeviceCertificatesRequestModel
+                data:
+                  action: ENROLL
+                  deviceCertificates:
+                    - deviceId: "{{ fmcansible_ra_target_device.id }}"
+                      certificates:
+                        - certificate:
+                            id: "{{ live_ra_certificate.id }}"
+                            name: "{{ live_ra_certificate.name }}"
+                            type: "{{ live_ra_certificate.type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_device_certificate_request
+
+            - name: Wait for RA VPN trustpoint enrollment
+              cisco.fmcansible.fmc_configuration:
+                operation: getTaskStatus
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: >-
+                    {{ live_ra_device_certificate_request.metadata.task.id }}
+                register_as: live_ra_device_certificate_task
+              retries: 80
+              delay: 15
+              until: >-
+                (live_ra_device_certificate_task.status
+                 | default('') | upper)
+                in ['COMPLETED', 'DEPLOYED', 'SUCCESS', 'SUCCEEDED']
+
+            - name: Read back the target FTD trustpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: getDeviceCertificateModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                query_params:
+                  filter: "deviceUUID:{{ fmcansible_ra_target_device.id }}"
+                  expanded: true
+                register_as: live_ra_device_certificates
+
+            - name: Select the target FTD trustpoint state
+              ansible.builtin.set_fact:
+                live_ra_target_device_certificates: >-
+                  {{ (live_ra_device_certificates | default([]))
+                     | selectattr('id', 'equalto',
+                                  fmcansible_ra_target_device.id)
+                     | list }}
+
+            - name: Assert the RA VPN trustpoint is enrolled on the target FTD
+              ansible.builtin.assert:
+                that:
+                  - live_ra_target_device_certificates | length == 1
+                  - >-
+                    live_ra_certificate.id in
+                    (live_ra_target_device_certificates[0]
+                     .enrolledCertificates | default([]) | to_json)
+                  - >-
+                    'SUCCESS' in
+                    (live_ra_target_device_certificates[0]
+                     .enrolledCertificates | default([]) | to_json | upper)
+
+            - name: Create RA VPN IPv4 address pool
+              cisco.fmcansible.fmc_configuration:
+                operation: createIPv4AddressPool
+                data:
+                  mask: "{{ fmcansible_ravpn_pool_mask }}"
+                  type: IPv4AddressPool
+                  ipAddressRange: "{{ fmcansible_ravpn_pool_range }}"
+                  addressType: RANGE
+                  overridable: false
+                  name: "{{ fmcansible_ravpn_pool_name }}"
+                  description: "{{ fmcansible_live_prefix }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_pool
+
+            - name: Read back RA VPN IPv4 address pool
+              cisco.fmcansible.fmc_configuration:
+                operation: getIPv4AddressPool
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_pool.id }}"
+                register_as: live_ra_pool_get
+
+            - name: Assert RA VPN IPv4 address pool persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_pool_get.id == live_ra_pool.id
+                  - live_ra_pool_get.name == fmcansible_ravpn_pool_name
+                  - live_ra_pool_get.type == 'IPv4AddressPool'
+                  - live_ra_pool_get.mask == fmcansible_ravpn_pool_mask
+                  - >-
+                    live_ra_pool_get.ipAddressRange
+                    == fmcansible_ravpn_pool_range
+                  - live_ra_pool_get.addressType == 'RANGE'
+                  - live_ra_pool_get.description == fmcansible_live_prefix
+
+            - name: Create RA VPN dynamic access policy
+              cisco.fmcansible.fmc_configuration:
+                operation: createDynamicAccessPolicy
+                data:
+                  name: "{{ fmcansible_ravpn_dap_name }}"
+                  type: DynamicAccessPolicy
+                  description: "{{ fmcansible_live_prefix }}"
+                  dapXmlConfig: "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9InllcyI/Pgo8ZGFwUmVjb3JkTGlzdC8+"
+                  authorizationAttributes:
+                    - priority: -1
+                      dapRecordName: DfltAccessPolicy
+                      action: CONTINUE
+                      message: FMCAnsible CI default access policy
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_dap
+
+            - name: Read back RA VPN dynamic access policy
+              cisco.fmcansible.fmc_configuration:
+                operation: getDynamicAccessPolicy
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_dap.id }}"
+                register_as: live_ra_dap_get
+
+            - name: Assert RA VPN dynamic access policy persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_dap_get.id == live_ra_dap.id
+                  - live_ra_dap_get.name == fmcansible_ravpn_dap_name
+                  - live_ra_dap_get.type == 'DynamicAccessPolicy'
+                  - live_ra_dap_get.description == fmcansible_live_prefix
+                  - live_ra_dap_get.authorizationAttributes | length == 1
+                  - >-
+                    live_ra_dap_get.authorizationAttributes[0].dapRecordName
+                    == 'DfltAccessPolicy'
+                  - >-
+                    live_ra_dap_get.authorizationAttributes[0].action
+                    == 'CONTINUE'
+
+            - name: Create RA VPN group policy
+              cisco.fmcansible.fmc_configuration:
+                operation: createMultipleGroupPolicyModel
+                data:
+                  name: "{{ fmcansible_ravpn_group_policy_name }}"
+                  type: GroupPolicy
+                  description: "{{ fmcansible_live_prefix }}"
+                  enableSSLProtocol: true
+                  enableIPsecIKEv2Protocol: true
+                  generalSettings:
+                    banner: FMCAnsible CI RAVPN validation
+                    addressAssignment:
+                      defaultDomainName: "{{ fmcansible_ravpn_ad_domain }}"
+                      ipv4LocalAddressPool:
+                        - name: "{{ live_ra_pool.name }}"
+                          id: "{{ live_ra_pool.id }}"
+                          type: "{{ live_ra_pool.type }}"
+                    splitTunnelSettings:
+                      ipv4SplitTunnelPolicy: TUNNEL_ALL
+                      ipv6SplitTunnelPolicy: TUNNEL_ALL
+                      splitDNSRequestPolicy: USE_SPLIT_TUNNEL_SETTING
+                  advancedSettings:
+                    sessionSettings:
+                      simultaneousLoginPerUser: 2
+                      maxConnectionTimeout: 480
+                      maxConnectionTimeAlertInterval: 5
+                      vpnIdleTimeout: 30
+                      vpnIdleTimeoutAlertInterval: 5
+                  anyConnectSettings:
+                    sslSettings:
+                      mtuSize: 1406
+                      ignoreDFBit: false
+                      sslCompression: DISABLED
+                      dtlsCompression: DISABLED
+                    connectionSettings:
+                      enableKeepAliveMessages: true
+                      keepAliveMessageInterval: 20
+                      enableClientDPD: true
+                      clientDPDInterval: 30
+                      enableGatewayDPD: true
+                      gatewayDPDInterval: 30
+                      enableSSLRekey: true
+                      rekeyMethod: NEW_TUNNEL
+                      rekeyInterval: 30
+                      bypassUnsupportProtocol: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_group_policy
+
+            - name: Read back RA VPN group policy
+              cisco.fmcansible.fmc_configuration:
+                operation: getGroupPolicyModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_group_policy.id }}"
+                register_as: live_ra_group_policy_get
+
+            - name: Assert RA VPN group policy persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_group_policy_get.id == live_ra_group_policy.id
+                  - >-
+                    live_ra_group_policy_get.name
+                    == fmcansible_ravpn_group_policy_name
+                  - live_ra_group_policy_get.type == 'GroupPolicy'
+                  - live_ra_group_policy_get.description == fmcansible_live_prefix
+                  - live_ra_group_policy_get.enableSSLProtocol | bool
+                  - live_ra_group_policy_get.enableIPsecIKEv2Protocol | bool
+                  - >-
+                    live_ra_group_policy_get.generalSettings.addressAssignment
+                    .ipv4LocalAddressPool[0].id == live_ra_pool.id
+                  - >-
+                    live_ra_group_policy_get.generalSettings.splitTunnelSettings
+                    .ipv4SplitTunnelPolicy == 'TUNNEL_ALL'
+                  - >-
+                    live_ra_group_policy_get.generalSettings.banner
+                    == 'FMCAnsible CI RAVPN validation'
+                  - >-
+                    live_ra_group_policy_get.generalSettings.addressAssignment
+                    .defaultDomainName == fmcansible_ravpn_ad_domain
+                  - >-
+                    live_ra_group_policy_get.advancedSettings.sessionSettings
+                    .simultaneousLoginPerUser == 2
+                  - >-
+                    live_ra_group_policy_get.advancedSettings.sessionSettings
+                    .vpnIdleTimeout == 30
+                  - >-
+                    live_ra_group_policy_get.anyConnectSettings.sslSettings
+                    .mtuSize == 1406
+                  - >-
+                    live_ra_group_policy_get.anyConnectSettings.connectionSettings
+                    .enableClientDPD | bool
+                  - >-
+                    live_ra_group_policy_get.anyConnectSettings.connectionSettings
+                    .rekeyMethod == 'NEW_TUNNEL'
+
+            - name: Create RA VPN policy
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDRAVpnModel
+                data: &ravpn_policy_data
+                  name: "{{ fmcansible_ravpn_name }}"
+                  type: RAVpn
+                  description: "{{ fmcansible_live_prefix }}"
+                  configureSSL: true
+                  configureIpsec: true
+                  ikev2Policies:
+                    - name: "{{ fmcansible_ra_ikev2_matches[0].name }}"
+                      id: "{{ fmcansible_ra_ikev2_matches[0].id }}"
+                      type: "{{ fmcansible_ra_ikev2_matches[0].type }}"
+                  accessInterfaceSettings:
+                    bypassACPolicyForDecryptTraffic: false
+                    interfaceSettings:
+                      - accessInterface:
+                          name: "{{ fmcansible_ra_zone_matches[0].name }}"
+                          id: "{{ fmcansible_ra_zone_matches[0].id }}"
+                          type: "{{ fmcansible_ra_zone_matches[0].type }}"
+                        configureInterfaceIDCertificate: false
+                        enableSSL: true
+                        enableIPSecIkev2: true
+                        enableDTLS: true
+                    webPort: 443
+                    sslIdCertificate:
+                      name: "{{ live_ra_certificate.name }}"
+                      id: "{{ live_ra_certificate.id }}"
+                      type: "{{ live_ra_certificate.type }}"
+                    ipsecIdCertificate:
+                      name: "{{ live_ra_certificate.name }}"
+                      id: "{{ live_ra_certificate.id }}"
+                      type: "{{ live_ra_certificate.type }}"
+                    allowConnectionProfileSelection: true
+                    dtlsPort: 443
+                  localRealmServer:
+                    name: "{{ live_ra_local_realm_get.name }}"
+                    id: "{{ live_ra_local_realm_get.id }}"
+                    type: "{{ live_ra_local_realm_get.type }}"
+                  groupPolicies:
+                    - name: "{{ live_ra_group_policy.name }}"
+                      id: "{{ live_ra_group_policy.id }}"
+                      type: "{{ live_ra_group_policy.type }}"
+                  anyConnectClientImages:
+                    - operatingSystem: "{{ fmcansible_ravpn_client_os }}"
+                      anyconnectImage:
+                        name: "{{ fmcansible_ra_package_matches[0].name }}"
+                        id: "{{ fmcansible_ra_package_matches[0].id }}"
+                        type: "{{ fmcansible_ra_package_matches[0].type }}"
+                  dapPolicy:
+                    name: "{{ live_ra_dap.name }}"
+                    id: "{{ live_ra_dap.id }}"
+                    type: "{{ live_ra_dap.type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_vpn
+
+            - name: Read back RA VPN policy before child configuration
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_vpn_initial_get
+
+            - name: Assert RA VPN policy references persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_vpn_initial_get.id == live_ra_vpn.id
+                  - live_ra_vpn_initial_get.name == fmcansible_ravpn_name
+                  - live_ra_vpn_initial_get.type == 'RAVpn'
+                  - live_ra_vpn_initial_get.description == fmcansible_live_prefix
+                  - live_ra_vpn_initial_get.configureSSL | bool
+                  - live_ra_vpn_initial_get.configureIpsec | bool
+                  - >-
+                    live_ra_vpn_initial_get.ikev2Policies[0].id
+                    == fmcansible_ra_ikev2_matches[0].id
+                  - >-
+                    live_ra_vpn_initial_get.accessInterfaceSettings
+                    .interfaceSettings[0].accessInterface.id
+                    == fmcansible_ra_zone_matches[0].id
+                  - >-
+                    live_ra_vpn_initial_get.accessInterfaceSettings
+                    .sslIdCertificate.id == live_ra_certificate.id
+                  - >-
+                    live_ra_group_policy.id
+                    in (live_ra_vpn_initial_get.groupPolicies
+                        | map(attribute='id')
+                        | list)
+                  - >-
+                    live_ra_vpn_initial_get.dapPolicy.id == live_ra_dap.id
+
+            - name: Bind the local identity realm to the RA VPN policy
+              cisco.fmcansible.fmc_configuration:
+                operation: updateFTDRAVpnModel
+                data:
+                  <<: *ravpn_policy_data
+                  id: "{{ live_ra_vpn.id }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_vpn_with_local_realm
+
+            - name: Read back the RA VPN local identity realm binding
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_vpn_with_local_realm_get
+
+            - name: Record RA VPN local identity realm binding support
+              ansible.builtin.set_fact:
+                fmcansible_ravpn_parent_local_realm_binding_supported: >-
+                  {{ ((live_ra_vpn_with_local_realm_get.localRealmServer
+                       | default({})).id | default(''))
+                     == live_ra_local_realm_get.id }}
+
+            - name: Report unsupported parent local realm binding
+              ansible.builtin.debug:
+                msg: >-
+                  The FMC API accepted localRealmServer on RAVPN POST and PUT
+                  but omitted it from GET. Local realm, local user, and
+                  local-auth profile coverage will continue; parent binding is
+                  recorded as unsupported for this platform build.
+              when: >-
+                not fmcansible_ravpn_parent_local_realm_binding_supported
+                | bool
+
+            - name: Get RA VPN address assignment settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDRAVpnAddressAssignmentSetting
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_address_assignment_settings
+
+            - name: Require one RA VPN address assignment setting
+              ansible.builtin.assert:
+                that:
+                  - live_ra_address_assignment_settings | length == 1
+
+            - name: Enable internal IPv4 pool assignment
+              cisco.fmcansible.fmc_configuration:
+                operation: updateFTDRAVpnAddressAssignmentSetting
+                data:
+                  id: "{{ live_ra_address_assignment_settings[0].id }}"
+                  type: RaVpnAddressAssignmentSetting
+                  useAuthorizationServerForIPv4: false
+                  useDHCP: false
+                  useInternalAddressPoolForIPv4: true
+                  ipAddressReuseInterval: 0
+                  useAuthorizationServerForIPv6: false
+                  useInternalAddressPoolForIPv6: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_address_assignment_settings[0].id }}"
+                register_as: live_ra_address_assignment
+
+            - name: Read back RA VPN address assignment setting
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnAddressAssignmentSetting
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_address_assignment_settings[0].id }}"
+                register_as: live_ra_address_assignment_get
+
+            - name: Assert RA VPN address assignment setting persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_ra_address_assignment_get.id
+                    == live_ra_address_assignment_settings[0].id
+                  - >-
+                    live_ra_address_assignment_get
+                    .useInternalAddressPoolForIPv4 | bool
+                  - >-
+                    not live_ra_address_assignment_get
+                    .useAuthorizationServerForIPv4 | bool
+                  - not live_ra_address_assignment_get.useDHCP | bool
+                  - >-
+                    not live_ra_address_assignment_get
+                    .useAuthorizationServerForIPv6 | bool
+                  - >-
+                    not live_ra_address_assignment_get
+                    .useInternalAddressPoolForIPv6 | bool
+
+            - name: Get the RA VPN LDAP attribute map
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDRAVpnLDAPAttributeModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_ldap_attribute_maps
+
+            - name: Require one RA VPN LDAP attribute map
+              ansible.builtin.assert:
+                that:
+                  - live_ra_ldap_attribute_maps | length == 1
+
+            - name: Map the AD VPN group to the test group policy
+              cisco.fmcansible.fmc_configuration:
+                operation: updateFTDRAVpnLDAPAttributeModel
+                data:
+                  id: "{{ live_ra_ldap_attribute_maps[0].id }}"
+                  type: RaVpnLdapAttributeMap
+                  ldapAttributeMapList:
+                    - ldapServer:
+                        name: "{{ live_ra_ad_realm.name }}"
+                        id: "{{ live_ra_ad_realm.id }}"
+                        type: "{{ live_ra_ad_realm.type }}"
+                      ldapAttributeMaps:
+                        - ldapName: memberOf
+                          ciscoName: Group-Policy
+                          valueMappings:
+                            - valueType: LdapToGroupPolicyMapping
+                              ldapValue: "{{ fmcansible_ravpn_ad_group_dn }}"
+                              groupPolicy:
+                                name: "{{ live_ra_group_policy.name }}"
+                                id: "{{ live_ra_group_policy.id }}"
+                                type: "{{ live_ra_group_policy.type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_ldap_attribute_maps[0].id }}"
+                register_as: live_ra_ldap_attribute_map
+
+            - name: Read back the RA VPN LDAP attribute map
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnLDAPAttributeModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_ldap_attribute_maps[0].id }}"
+                register_as: live_ra_ldap_attribute_map_get
+
+            - name: Assert the RA VPN LDAP attribute map persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_ra_ldap_attribute_map_get.id
+                    == live_ra_ldap_attribute_maps[0].id
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapServer.id
+                    == live_ra_ad_realm.id
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapAttributeMaps[0].ldapName
+                    == 'memberOf'
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapAttributeMaps[0].ciscoName
+                    == 'Group-Policy'
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapAttributeMaps[0]
+                    .valueMappings[0].valueType
+                    == 'LdapToGroupPolicyMapping'
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapAttributeMaps[0]
+                    .valueMappings[0].ldapValue
+                    == fmcansible_ravpn_ad_group_dn
+                  - >-
+                    live_ra_ldap_attribute_map_get
+                    .ldapAttributeMapList[0].ldapAttributeMaps[0]
+                    .valueMappings[0].groupPolicy.id
+                    == live_ra_group_policy.id
+
+            - name: Create local-auth RA VPN connection profile
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDRAVpnConnectionProfileModel
+                data:
+                  name: "{{ fmcansible_ravpn_local_profile_name }}"
+                  type: RaVpnConnectionProfile
+                  description: "{{ fmcansible_live_prefix }}"
+                  authenticationMethod: AAA_ONLY
+                  useLocalAsPrimaryAuthServer: true
+                  enablePrimaryAuthFallbackToLocal: false
+                  groupPolicy:
+                    name: "{{ live_ra_group_policy.name }}"
+                    id: "{{ live_ra_group_policy.id }}"
+                    type: "{{ live_ra_group_policy.type }}"
+                  ipv4AddressPool:
+                    - name: "{{ live_ra_pool.name }}"
+                      id: "{{ live_ra_pool.id }}"
+                      type: "{{ live_ra_pool.type }}"
+                  groupAlias:
+                    - aliasName: "{{ fmcansible_ravpn_local_group_alias }}"
+                      enabled: true
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_local_profile
+
+            - name: Read back local-auth RA VPN connection profile
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnConnectionProfileModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_local_profile.id }}"
+                register_as: live_ra_local_profile_get
+
+            - name: Assert local-auth RA VPN connection profile persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_ra_local_profile_get.id
+                    == live_ra_local_profile.id
+                  - >-
+                    live_ra_local_profile_get.name
+                    == fmcansible_ravpn_local_profile_name
+                  - >-
+                    live_ra_local_profile_get.type
+                    == 'RaVpnConnectionProfile'
+                  - >-
+                    live_ra_local_profile_get.authenticationMethod
+                    == 'AAA_ONLY'
+                  - >-
+                    live_ra_local_profile_get.useLocalAsPrimaryAuthServer
+                    | bool
+                  - >-
+                    live_ra_local_profile_get.groupPolicy.id
+                    == live_ra_group_policy.id
+                  - >-
+                    live_ra_local_profile_get.ipv4AddressPool[0].id
+                    == live_ra_pool.id
+                  - >-
+                    live_ra_local_profile_get.groupAlias[0].aliasName
+                    == fmcansible_ravpn_local_group_alias
+
+            - name: Create AD-auth RA VPN connection profile
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDRAVpnConnectionProfileModel
+                data:
+                  name: "{{ fmcansible_ravpn_ad_profile_name }}"
+                  type: RaVpnConnectionProfile
+                  description: "{{ fmcansible_live_prefix }}"
+                  authenticationMethod: AAA_ONLY
+                  useLocalAsPrimaryAuthServer: false
+                  enablePrimaryAuthFallbackToLocal: false
+                  primaryAuthenticationServer:
+                    name: "{{ live_ra_ad_realm.name }}"
+                    id: "{{ live_ra_ad_realm.id }}"
+                    type: "{{ live_ra_ad_realm.type }}"
+                  authorizationServer:
+                    name: "{{ live_ra_ad_realm.name }}"
+                    id: "{{ live_ra_ad_realm.id }}"
+                    type: "{{ live_ra_ad_realm.type }}"
+                  allowConnectionOnlyIfAuthorized: true
+                  stripRealmFromUsername: true
+                  stripGroupFromUsername: true
+                  groupPolicy:
+                    name: "{{ live_ra_group_policy.name }}"
+                    id: "{{ live_ra_group_policy.id }}"
+                    type: "{{ live_ra_group_policy.type }}"
+                  ipv4AddressPool:
+                    - name: "{{ live_ra_pool.name }}"
+                      id: "{{ live_ra_pool.id }}"
+                      type: "{{ live_ra_pool.type }}"
+                  groupAlias:
+                    - aliasName: "{{ fmcansible_ravpn_ad_group_alias }}"
+                      enabled: true
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_ad_profile
+
+            - name: Read back AD-auth RA VPN connection profile
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnConnectionProfileModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_ad_profile.id }}"
+                register_as: live_ra_ad_profile_get
+
+            - name: Assert AD-auth RA VPN connection profile persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_ad_profile_get.id == live_ra_ad_profile.id
+                  - >-
+                    live_ra_ad_profile_get.name
+                    == fmcansible_ravpn_ad_profile_name
+                  - >-
+                    live_ra_ad_profile_get.type
+                    == 'RaVpnConnectionProfile'
+                  - >-
+                    live_ra_ad_profile_get.authenticationMethod
+                    == 'AAA_ONLY'
+                  - >-
+                    not live_ra_ad_profile_get.useLocalAsPrimaryAuthServer
+                    | bool
+                  - >-
+                    not live_ra_ad_profile_get.enablePrimaryAuthFallbackToLocal
+                    | bool
+                  - >-
+                    live_ra_ad_profile_get.primaryAuthenticationServer.id
+                    == live_ra_ad_realm.id
+                  - >-
+                    live_ra_ad_profile_get.authorizationServer.id
+                    == live_ra_ad_realm.id
+                  - >-
+                    live_ra_ad_profile_get.allowConnectionOnlyIfAuthorized
+                    | bool
+                  - live_ra_ad_profile_get.stripRealmFromUsername | bool
+                  - live_ra_ad_profile_get.stripGroupFromUsername | bool
+                  - >-
+                    live_ra_ad_profile_get.groupPolicy.id
+                    == live_ra_group_policy.id
+                  - >-
+                    live_ra_ad_profile_get.ipv4AddressPool[0].id
+                    == live_ra_pool.id
+                  - >-
+                    live_ra_ad_profile_get.groupAlias[0].aliasName
+                    == fmcansible_ravpn_ad_group_alias
+
+            - name: Read created RA VPN policy
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDRAVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_vpn_after_create
+
+            - name: Read created RA VPN connection profiles
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDRAVpnConnectionProfileModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_profiles_after_create
+
+            - name: Assert complete RA VPN configuration
+              ansible.builtin.assert:
+                that:
+                  - live_ra_vpn_after_create.name == fmcansible_ravpn_name
+                  - live_ra_vpn_after_create.configureSSL | bool
+                  - live_ra_vpn_after_create.configureIpsec | bool
+                  - live_ra_vpn_after_create.anyConnectClientImages | length == 1
+                  - >-
+                    (live_ra_profiles_after_create | default([]))
+                    | selectattr('name', 'equalto',
+                                 fmcansible_ravpn_local_profile_name)
+                    | list
+                    | length == 1
+                  - >-
+                    (live_ra_profiles_after_create | default([]))
+                    | selectattr('name', 'equalto',
+                                 fmcansible_ravpn_ad_profile_name)
+                    | list
+                    | length == 1
+                  - >-
+                    live_ra_address_assignment_get
+                    .useInternalAddressPoolForIPv4 | bool
+
+            - name: Remove the non-deployable local-auth connection profile
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteFTDRAVpnConnectionProfileModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                  objectId: "{{ live_ra_local_profile.id }}"
+              when: >-
+                not fmcansible_ravpn_parent_local_realm_binding_supported
+                | bool
+
+            - name: Read deployment-ready RA VPN connection profiles
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllFTDRAVpnConnectionProfileModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_ra_vpn.id }}"
+                register_as: live_ra_profiles_for_deployment
+
+            - name: Assert the deployment-ready RA VPN profiles
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    (live_ra_profiles_for_deployment | default([]))
+                    | selectattr('name', 'equalto',
+                                 fmcansible_ravpn_ad_profile_name)
+                    | list
+                    | length == 1
+                  - >-
+                    fmcansible_ravpn_parent_local_realm_binding_supported
+                    | bool or
+                    ((live_ra_profiles_for_deployment | default([]))
+                     | selectattr('name', 'equalto',
+                                  fmcansible_ravpn_local_profile_name)
+                     | list
+                     | length == 0)
+
+            - name: Assign RA VPN policy to the target FTD
+              cisco.fmcansible.fmc_configuration:
+                operation: createPolicyAssignment
+                data:
+                  name: "{{ live_ra_vpn.name }}"
+                  type: PolicyAssignment
+                  policy:
+                    id: "{{ live_ra_vpn.id }}"
+                    name: "{{ live_ra_vpn.name }}"
+                    type: "{{ live_ra_vpn.type }}"
+                  targets:
+                    - id: "{{ fmcansible_ra_target_device.id }}"
+                      name: "{{ fmcansible_ra_target_device.name }}"
+                      type: Device
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_ra_policy_assignment
+
+            - name: Read back RA VPN policy assignment
+              cisco.fmcansible.fmc_configuration:
+                operation: getPolicyAssignment
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_ra_policy_assignment.id }}"
+                register_as: live_ra_policy_assignment_get
+
+            - name: Assert RA VPN policy assignment persisted
+              ansible.builtin.assert:
+                that:
+                  - live_ra_policy_assignment_get.policy.id == live_ra_vpn.id
+                  - live_ra_policy_assignment_get.policy.type == 'RAVpn'
+                  - live_ra_policy_assignment_get.targets | length == 1
+                  - >-
+                    live_ra_policy_assignment_get.targets[0].id
+                    == fmcansible_ra_target_device.id
+
+            - name: Deploy the assigned RA VPN policy
+              ansible.builtin.include_tasks: ../tasks/deploy_ravpn_target.yml
+              vars:
+                fmcansible_ravpn_deployment_note: >-
+                  Apply {{ fmcansible_ravpn_name }}
+                fmcansible_ravpn_deployment_required: true
+              when: fmcansible_ravpn_deploy | bool
+          always:
+            - name: Remove this run's RA VPN assignment
+              ansible.builtin.include_tasks: ../tasks/cleanup_ravpn_assignment.yml
+              when: live_ra_vpn is defined
+
+            - name: Clean up this run's RA VPN resources
+              ansible.builtin.include_tasks: ../tasks/cleanup_ravpn_named.yml
+
+            - name: Clean up this run's RAVPN identity resources
+              ansible.builtin.include_tasks: ../tasks/cleanup_ravpn_identity.yml
+
+            - name: Deploy RA VPN removal
+              ansible.builtin.include_tasks: ../tasks/deploy_ravpn_target.yml
+              vars:
+                fmcansible_ravpn_deployment_note: >-
+                  Remove {{ fmcansible_ravpn_name }}
+                fmcansible_ravpn_deployment_required: false
+              when:
+                - fmcansible_ravpn_deploy | bool
+                - live_ra_vpn is defined
+
+            - name: Remove this run's trustpoint and certificate enrollment
+              ansible.builtin.include_tasks: >-
+                ../tasks/cleanup_ravpn_certificate.yml
+
+        - name: Re-read RA VPNs after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDRAVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            filters:
+              name: "{{ fmcansible_ravpn_name }}"
+            register_as: live_ra_vpns_after_cleanup
+
+        - name: Assert RA VPN cleanup
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_ra_vpns_after_cleanup | default([]))
+                | selectattr('name', 'equalto', fmcansible_ravpn_name)
+                | list
+                | length == 0
+
+        - name: Get deployment state after RA VPN cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getDeployableDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            query_params:
+              expanded: true
+            register_as: live_ra_deployable_after_cleanup
+          when: fmcansible_ravpn_deploy | bool
+
+        - name: Assert clean RA VPN deployment state
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_ra_deployable_after_cleanup | default([]))
+                | selectattr('device.id', 'equalto',
+                             fmcansible_ra_target_device.id)
+                | list
+                | length == 0
+          when: fmcansible_ravpn_deploy | bool

@@ -1,0 +1,70 @@
+---
+- name: Get the target device certificate state for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeviceCertificateModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      filter: "deviceUUID:{{ fmcansible_ra_target_device.id }}"
+      expanded: true
+    register_as: cleanup_ra_device_certificates
+
+- name: Select the target device certificate state for cleanup
+  ansible.builtin.set_fact:
+    cleanup_ra_device_certificate_matches: >-
+      {{ (cleanup_ra_device_certificates | default([]))
+         | selectattr('id', 'equalto', fmcansible_ra_target_device.id)
+         | list }}
+
+- name: Remove the test trustpoint from the target device
+  cisco.fmcansible.fmc_configuration:
+    operation: createManageDeviceCertificatesRequestModel
+    data:
+      action: DELETE
+      deviceCertificates:
+        - deviceId: "{{ fmcansible_ra_target_device.id }}"
+          certificates:
+            - certificate:
+                id: "{{ live_ra_certificate.id }}"
+                name: "{{ live_ra_certificate.name }}"
+                type: "{{ live_ra_certificate.type }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_ra_device_certificate_request
+  when:
+    - cleanup_ra_device_certificate_matches | length == 1
+    - >-
+      live_ra_certificate.id in
+      (cleanup_ra_device_certificate_matches[0].enrolledCertificates
+       | default([]) | to_json)
+
+- name: Wait for test trustpoint removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getTaskStatus
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ra_device_certificate_request.metadata.task.id }}"
+    register_as: cleanup_ra_device_certificate_task
+  retries: 80
+  delay: 15
+  until: >-
+    (cleanup_ra_device_certificate_task.status | default('') | upper)
+    in ['COMPLETED', 'DEPLOYED', 'SUCCESS', 'SUCCEEDED']
+  when: cleanup_ra_device_certificate_request is defined
+
+- name: Re-read the target device certificate state after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeviceCertificateModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      filter: "deviceUUID:{{ fmcansible_ra_target_device.id }}"
+      expanded: true
+    register_as: cleanup_ra_device_certificates_after
+
+- name: Assert the test trustpoint was removed from the target device
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_ra_certificate.id not in
+        (cleanup_ra_device_certificates_after | default([]) | to_json)

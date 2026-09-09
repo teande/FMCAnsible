@@ -1,0 +1,217 @@
+---
+- name: Validate deployed FMC BGP lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_phase: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PHASE') | default('build', true) }}"
+    fmcansible_routing_interface_name: "{{ lookup('env', 'FMCANSIBLE_ROUTING_INTERFACE') }}"
+    bgp_general_name: AsaBGPGeneralTable
+    bgp_name: bgp
+  tasks:
+    - name: Validate BGP test inputs
+      ansible.builtin.assert:
+        that:
+          - routing_phase in ['build', 'cleanup']
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_interface_name | length > 0
+
+    - name: Discover routing context
+      ansible.builtin.include_tasks: ../tasks/dynamic_routing_context.yml
+
+    - name: Read existing BGP address families
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllBGPIPvAddressFamilyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: bgp_existing
+
+    - name: Read existing BGP general settings
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllBGPGeneralSettingModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: bgp_general_existing
+
+    - name: Select this test's BGP resource
+      ansible.builtin.set_fact:
+        bgp_matches: >-
+          {{ bgp_existing
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', bgp_name)
+             | list }}
+        bgp_general_matches: >-
+          {{ bgp_general_existing
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', bgp_general_name)
+             | list }}
+
+    - name: Refuse duplicate BGP test resources
+      ansible.builtin.assert:
+        that:
+          - bgp_matches | length <= 1
+          - bgp_general_matches | length <= 1
+
+    - name: Build and verify BGP configuration
+      when: routing_phase == 'build'
+      block:
+        - name: Create or verify BGP general settings
+          cisco.fmcansible.fmc_configuration:
+            operation: createBGPGeneralSettingModel
+            data:
+              name: "{{ bgp_general_name }}"
+              asNumber: '65001'
+              routerId: "{{ fmcansible_routing_ftd_ipv4_address }}"
+              aggregateTimer: 30
+              enforceFirstAs: true
+              fastExternalFallOver: true
+              logNeighborChanges: true
+              scanTime: 60
+              transportPathMtuDiscovery: true
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: bgp_general_created
+          register: bgp_general_create_result
+
+        - name: Read back BGP general settings
+          cisco.fmcansible.fmc_configuration:
+            operation: getBGPGeneralSettingModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ bgp_general_created.id }}"
+            register_as: bgp_general_readback
+
+        - name: Assert exact BGP general settings persisted
+          ansible.builtin.assert:
+            that:
+              - bgp_general_readback.name == bgp_general_name
+              - bgp_general_readback.asNumber == '65001'
+              - >-
+                bgp_general_readback.routerId
+                == fmcansible_routing_ftd_ipv4_address
+              - bgp_general_readback.logNeighborChanges | bool
+
+        - name: Create or verify BGP address family
+          cisco.fmcansible.fmc_configuration:
+            operation: createBGPIPvAddressFamilyModel
+            data:
+              name: "{{ bgp_name }}"
+              type: bgp
+              asNumber: '65001'
+              routerId: null
+              routerIdVariable: null
+              addressFamilyIPv4:
+                type: afipv4
+                autoSummary: false
+                bgpRedistributeInternal: false
+                bgpSupressInactive: false
+                defaultInformationOrginate: false
+                synchronization: false
+                neighbors:
+                  - type: neighboripv4
+                    ipv4Address: "{{ fmcansible_routing_peer_ipv4_address }}"
+                    remoteAs: '65002'
+                    neighborGeneral:
+                      type: neighborgeneral
+                      enableAddress: true
+                      shutdown: false
+                      fallOverBFD: NONE
+                      updateSource:
+                        id: "{{ fmcansible_routing_interface.id }}"
+                        name: "{{ fmcansible_routing_interface.name }}"
+                        type: PhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: bgp_created
+          register: bgp_create_result
+
+        - name: Read back BGP address family
+          cisco.fmcansible.fmc_configuration:
+            operation: getBGPIPvAddressFamilyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ bgp_created.id }}"
+            register_as: bgp_readback
+
+        - name: Assert exact BGP configuration persisted
+          ansible.builtin.assert:
+            that:
+              - bgp_readback.name == bgp_name
+              - bgp_readback.asNumber == '65001'
+              - bgp_readback.addressFamilyIPv4.neighbors | length == 1
+              - >-
+                bgp_readback.addressFamilyIPv4.neighbors[0].ipv4Address
+                == fmcansible_routing_peer_ipv4_address
+              - bgp_readback.addressFamilyIPv4.neighbors[0].remoteAs == '65002'
+              - bgp_readback.addressFamilyIPv4.neighbors[0].neighborGeneral.updateSource.id == fmcansible_routing_interface.id
+
+        - name: Deploy BGP configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} configure BGP"
+          when: >-
+            (bgp_general_create_result.changed | bool)
+            or (bgp_create_result.changed | bool)
+
+    - name: Remove and verify BGP configuration
+      when: routing_phase == 'cleanup'
+      block:
+        - name: Delete BGP address family
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteBGPIPvAddressFamilyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ bgp_matches[0].id }}"
+          when: bgp_matches | length == 1
+
+        - name: Delete BGP general settings
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteBGPGeneralSettingModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ bgp_general_matches[0].id }}"
+          when: bgp_general_matches | length == 1
+
+        - name: Deploy BGP cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} remove BGP"
+          when: >-
+            bgp_matches | length == 1
+            or bgp_general_matches | length == 1
+
+        - name: Read BGP resources after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllBGPIPvAddressFamilyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: bgp_after_cleanup
+
+        - name: Read BGP general settings after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllBGPGeneralSettingModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: bgp_general_after_cleanup
+
+        - name: Assert BGP resource was removed
+          ansible.builtin.assert:
+            that:
+              - bgp_name not in (bgp_after_cleanup | map(attribute='name', default='') | list)
+              - bgp_general_name not in (bgp_general_after_cleanup | map(attribute='name', default='') | list)

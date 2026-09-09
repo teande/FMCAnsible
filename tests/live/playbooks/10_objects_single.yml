@@ -1,0 +1,79 @@
+---
+- name: Validate single object create and delete
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Store domain UUID
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+        fmcansible_created_single_host_id: null
+
+    - name: Create, validate, and clean up single host object
+      block:
+        - name: Create host object
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertHostObject
+            data:
+              name: "{{ fmcansible_object_single.name }}"
+              type: Host
+              value: "{{ fmcansible_object_single.value }}"
+              description: "{{ fmcansible_live_prefix }}"
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_single_host
+
+        - name: Track single host object ID
+          ansible.builtin.set_fact:
+            fmcansible_created_single_host_id: "{{ live_single_host.id }}"
+
+        - name: Read back single host object
+          cisco.fmcansible.fmc_configuration:
+            operation: getHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_single_host_id }}"
+            register_as: live_single_host_get
+
+        - name: Assert single host object persisted
+          ansible.builtin.assert:
+            that:
+              - live_single_host_get.id == fmcansible_created_single_host_id
+              - live_single_host_get.name == fmcansible_object_single.name
+              - live_single_host_get.type == 'Host'
+              - live_single_host_get.value == fmcansible_object_single.value
+              - live_single_host_get.description == fmcansible_live_prefix
+      always:
+        - name: Delete host object
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_single_host_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - fmcansible_created_single_host_id is not none
+
+    - name: Verify single host object was removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        filters:
+          name: "{{ fmcansible_object_single.name }}"
+        register_as: live_single_host_after_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Assert single host cleanup
+      ansible.builtin.assert:
+        that:
+          - (live_single_host_after_cleanup | default([])) | length == 0
+      when: fmcansible_cleanup_after_test | bool

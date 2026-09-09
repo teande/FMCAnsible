@@ -1,0 +1,11 @@
+---
+- name: Cleanup FMCAnsible live-test resources
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../vars/feature_matrix.yml
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Run shared live-test cleanup
+      ansible.builtin.include_tasks: ../tasks/cleanup_resources.yml

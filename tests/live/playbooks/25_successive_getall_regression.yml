@@ -1,0 +1,48 @@
+---
+- name: Validate successive looped GETALL requests
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: successive_domains
+
+    - name: Gather network groups in first loop
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkGroup
+        query_params:
+          filter: "nameOrValue:{{ item }}"
+          expanded: true
+        path_params:
+          domainUUID: "{{ successive_domains[0].uuid }}"
+        register_as: first_gather
+      loop:
+        - helloworld
+        - test
+        - asdf
+      register: first_gather_tasks
+
+    - name: Gather network groups in second loop
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkGroup
+        query_params:
+          filter: "nameOrValue:{{ item }}"
+          expanded: true
+        path_params:
+          domainUUID: "{{ successive_domains[0].uuid }}"
+        register_as: second_gather
+      loop:
+        - helloworld
+        - test
+        - asdf
+      register: second_gather_tasks
+
+    - name: Assert every successive request succeeded
+      ansible.builtin.assert:
+        that:
+          - first_gather_tasks.results | selectattr('failed', 'defined') | selectattr('failed') | list | length == 0
+          - second_gather_tasks.results | selectattr('failed', 'defined') | selectattr('failed') | list | length == 0
+          - first_gather_tasks.results | length == 3
+          - second_gather_tasks.results | length == 3

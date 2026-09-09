@@ -1,0 +1,77 @@
+---
+- name: Probe S2S topology and license API behavior
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled S2S topology probe
+      ansible.builtin.debug:
+        msg: "S2S topology API probe is disabled."
+      when: not fmcansible_run_s2s_topology_probe_tests | bool
+
+    - name: Probe S2S topology shells
+      when: fmcansible_run_s2s_topology_probe_tests | bool
+      block:
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_s2s_probe_domains
+
+        - name: Initialize S2S topology probe
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_s2s_probe_domains[fmcansible_domain_index].uuid }}
+            fmcansible_s2s_topology_probe_results: []
+
+        - name: Probe declared S2S topology types
+          ansible.builtin.include_tasks: ../tasks/probe_s2s_topology.yml
+          loop: "{{ fmcansible_s2s_topology_probes }}"
+          loop_control:
+            loop_var: fmcansible_s2s_probe
+            label: "{{ fmcansible_s2s_probe.key }}"
+
+        - name: Re-read S2S VPNs after topology probes
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDS2SVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: fmcansible_s2s_vpns_after_probes
+
+        - name: Require complete S2S topology probe cleanup
+          ansible.builtin.assert:
+            that:
+              - >-
+                (fmcansible_s2s_vpns_after_probes | default([]))
+                | selectattr('name', 'defined')
+                | selectattr(
+                    'name',
+                    'match',
+                    '^' ~ (fmcansible_live_prefix | regex_escape) ~ '-probe-'
+                  )
+                | list
+                | length == 0
+
+        - name: Report S2S topology API behavior
+          ansible.builtin.debug:
+            var: fmcansible_s2s_topology_probe_results
+
+        - name: Find unexpected S2S topology rejections
+          ansible.builtin.set_fact:
+            fmcansible_s2s_unexpected_rejections: >-
+              {{ fmcansible_s2s_topology_probe_results
+                 | selectattr(
+                     'status',
+                     'equalto',
+                     'unexpected-rejection'
+                   )
+                 | list }}
+
+        - name: Reject unexpected topology API failures
+          ansible.builtin.assert:
+            that:
+              - fmcansible_s2s_unexpected_rejections | length == 0
+            fail_msg: >-
+              Unexpected S2S topology API failures:
+              {{ fmcansible_s2s_unexpected_rejections | to_json }}.

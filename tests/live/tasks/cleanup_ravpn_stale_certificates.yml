@@ -1,0 +1,56 @@
+---
+- name: Get stale RAVPN certificate enrollments
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_stale_ravpn_certificates
+
+- name: Select stale RAVPN certificate enrollments
+  ansible.builtin.set_fact:
+    cleanup_stale_ravpn_certificate_matches: >-
+      {{ (cleanup_stale_ravpn_certificates | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match',
+                      '^' ~ fmcansible_cleanup_prefix
+                      ~ '.*-ravpn-cert$')
+         | list }}
+
+- name: Remove stale RAVPN trustpoints from the target FTD
+  ansible.builtin.include_tasks: cleanup_ravpn_device_certificate.yml
+  vars:
+    live_ra_certificate: "{{ cleanup_stale_ravpn_certificate }}"
+  loop: "{{ cleanup_stale_ravpn_certificate_matches }}"
+  loop_control:
+    loop_var: cleanup_stale_ravpn_certificate
+    label: "{{ cleanup_stale_ravpn_certificate.name }}"
+
+- name: Delete stale RAVPN certificate enrollments
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_stale_ravpn_certificate.id }}"
+  loop: "{{ cleanup_stale_ravpn_certificate_matches }}"
+  loop_control:
+    loop_var: cleanup_stale_ravpn_certificate
+    label: "{{ cleanup_stale_ravpn_certificate.name }}"
+
+- name: Re-read RAVPN certificate enrollments after stale cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_stale_ravpn_certificates_after
+
+- name: Assert stale RAVPN certificate enrollments were removed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cleanup_stale_ravpn_certificates_after | default([]))
+        | selectattr('name', 'defined')
+        | selectattr('name', 'match',
+                     '^' ~ fmcansible_cleanup_prefix
+                     ~ '.*-ravpn-cert$')
+        | list
+        | length == 0

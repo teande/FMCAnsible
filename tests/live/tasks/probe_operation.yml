@@ -1,0 +1,45 @@
+---
+- name: "Probe API capability: {{ fmcansible_probe.key }}"
+  block:
+    - name: "Call {{ fmcansible_probe.operation }}"
+      cisco.fmcansible.fmc_configuration:
+        operation: "{{ fmcansible_probe.operation }}"
+        path_params: "{{ fmcansible_probe_path_params }}"
+      register: fmcansible_probe_response
+
+    - name: "Record accepted capability: {{ fmcansible_probe.key }}"
+      ansible.builtin.set_fact:
+        "{{ fmcansible_probe_report_fact }}": >-
+          {{
+            (vars[fmcansible_probe_report_fact] | default({}))
+            | combine({
+                fmcansible_probe.key: {
+                  'operation': fmcansible_probe.operation,
+                  'required': fmcansible_probe.required | bool,
+                  'status': 'accepted',
+                  'items': (
+                    fmcansible_probe_response.response
+                    | default([])
+                    | length
+                  )
+                }
+              })
+          }}
+  rescue:
+    - name: "Record rejected capability: {{ fmcansible_probe.key }}"
+      ansible.builtin.set_fact:
+        "{{ fmcansible_probe_report_fact }}": >-
+          {{
+            (vars[fmcansible_probe_report_fact] | default({}))
+            | combine({
+                fmcansible_probe.key: {
+                  'operation': fmcansible_probe.operation,
+                  'required': fmcansible_probe.required | bool,
+                  'status': 'unsupported_or_rejected',
+                  'message': (
+                    ansible_failed_result.msg
+                    | default('Operation failed without an error message')
+                  )
+                }
+              })
+          }}

@@ -1,0 +1,87 @@
+---
+- name: Get deployable devices for S2S deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: live_s2s_deployable_devices
+
+- name: Select deployable S2S endpoints
+  ansible.builtin.set_fact:
+    live_s2s_target_deployable_matches: >-
+      {{ (live_s2s_deployable_devices | default([]))
+         | selectattr('device.id', 'in', fmcansible_s2s_deployment_device_ids)
+         | list }}
+
+- name: Require every S2S endpoint to be deployable
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_s2s_target_deployable_matches | length
+        == fmcansible_s2s_deployment_device_ids | length
+      - >-
+        live_s2s_target_deployable_matches
+        | rejectattr('canBeDeployed', 'equalto', true)
+        | list
+        | length == 0
+      - >-
+        live_s2s_target_deployable_matches
+        | selectattr('isDeploying', 'equalto', true)
+        | list
+        | length == 0
+    fail_msg: >-
+      Not every S2S endpoint is ready for
+      {{ fmcansible_s2s_deployment_note }}.
+  when: fmcansible_s2s_deployment_required | bool
+
+- name: Submit S2S deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: createDeploymentRequest
+    data:
+      type: DeploymentRequest
+      version: "0"
+      forceDeploy: false
+      ignoreWarning: true
+      deploymentNote: "{{ fmcansible_s2s_deployment_note }}"
+      deviceList: >-
+        {{ live_s2s_target_deployable_matches
+           | map(attribute='device.id')
+           | list }}
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+  register: live_s2s_deployment
+  when: live_s2s_target_deployable_matches | length > 0
+
+- name: Wait for S2S deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getTaskStatus
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_s2s_deployment.response.metadata.task.id }}"
+    query_params:
+      showDetailedDeviceStatus: true
+  register: live_s2s_deployment_status
+  until: >-
+    live_s2s_deployment_status.response.status | default('') | upper
+    in ['COMPLETED', 'DEPLOYED', 'FAILED']
+  retries: 80
+  delay: 15
+  when: live_s2s_target_deployable_matches | length > 0
+
+- name: Require successful S2S deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_s2s_deployment_status.response.status | upper
+        in ['COMPLETED', 'DEPLOYED']
+      - >-
+        live_s2s_deployment_status.response.subTasks | default([])
+        | rejectattr('status', 'equalto', 'SUCCEEDED')
+        | list
+        | length == 0
+    fail_msg: >-
+      {{ live_s2s_deployment_status.response.message
+         | default(fmcansible_s2s_deployment_note + ' failed') }}
+  when: live_s2s_target_deployable_matches | length > 0

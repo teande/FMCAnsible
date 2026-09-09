@@ -1,0 +1,42 @@
+---
+- name: Get connection profiles for stale RA VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_ra_vpn.id }}"
+    register_as: cleanup_ra_connection_profiles
+
+- name: Delete connection profiles for stale RA VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_ra_vpn.id }}"
+      objectId: "{{ stale_ra_connection_profile.id }}"
+  loop: "{{ cleanup_ra_connection_profiles | default([]) }}"
+  loop_control:
+    loop_var: stale_ra_connection_profile
+    label: >-
+      {{ stale_ra_connection_profile.name
+         | default(stale_ra_connection_profile.id) }}
+
+- name: Re-read connection profiles after RA VPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_ra_vpn.id }}"
+    register_as: cleanup_ra_connection_profiles_after
+
+- name: Assert RA VPN connection profiles were removed
+  ansible.builtin.assert:
+    that:
+      - (cleanup_ra_connection_profiles_after | default([])) | length == 0
+
+- name: Delete stale RA VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_ra_vpn.id }}"

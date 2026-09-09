@@ -1,0 +1,586 @@
+---
+- name: Get FMC domains for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: cleanup_domains
+
+- name: Store cleanup domain UUID
+  ansible.builtin.set_fact:
+    fmcansible_domain_uuid: >-
+      {{ cleanup_domains[fmcansible_domain_index].uuid }}
+
+- name: Get access policies for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_access_policies
+
+- name: Select stale access policies
+  ansible.builtin.set_fact:
+    fmcansible_stale_access_policies: >-
+      {{ (cleanup_access_policies | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale access policies and their rules
+  ansible.builtin.include_tasks: cleanup_access_policy.yml
+  loop: "{{ fmcansible_stale_access_policies }}"
+  loop_control:
+    loop_var: stale_access_policy
+    label: "{{ stale_access_policy.name }}"
+
+- name: Get FTD Platform Settings policies for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPlatformSettingsPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_platform_policies
+
+- name: Select stale FTD Platform Settings policies
+  ansible.builtin.set_fact:
+    fmcansible_stale_platform_policies: >-
+      {{ (cleanup_platform_policies | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale FTD Platform Settings policies
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDPlatformSettingsPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_platform_policy.id }}"
+  loop: "{{ fmcansible_stale_platform_policies }}"
+  loop_control:
+    loop_var: stale_platform_policy
+    label: "{{ stale_platform_policy.name }}"
+
+- name: Get file policies for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFilePolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_file_policies
+
+- name: Select stale file policies
+  ansible.builtin.set_fact:
+    fmcansible_stale_file_policies: >-
+      {{ (cleanup_file_policies | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale file policies and their rules
+  ansible.builtin.include_tasks: cleanup_file_policy.yml
+  loop: "{{ fmcansible_stale_file_policies }}"
+  loop_control:
+    loop_var: stale_file_policy
+    label: "{{ stale_file_policy.name }}"
+
+- name: Get site-to-site VPNs for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_s2s_vpns
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .s2s_create_delete | bool
+
+- name: Select stale site-to-site VPNs
+  ansible.builtin.set_fact:
+    fmcansible_stale_s2s_vpns: >-
+      {{ (cleanup_s2s_vpns | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .s2s_create_delete | bool
+
+- name: Delete stale site-to-site VPNs and endpoints
+  ansible.builtin.include_tasks: cleanup_s2s_vpn.yml
+  loop: "{{ fmcansible_stale_s2s_vpns | default([]) }}"
+  loop_control:
+    loop_var: stale_s2s_vpn
+    label: "{{ stale_s2s_vpn.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .s2s_create_delete | bool
+
+- name: Get RA VPNs for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_ra_vpns
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Select stale RA VPNs
+  ansible.builtin.set_fact:
+    fmcansible_stale_ra_vpns: >-
+      {{ (cleanup_ra_vpns | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Delete stale RA VPNs and connection profiles
+  ansible.builtin.include_tasks: cleanup_ra_vpn.yml
+  loop: "{{ fmcansible_stale_ra_vpns | default([]) }}"
+  loop_control:
+    loop_var: stale_ra_vpn
+    label: "{{ stale_ra_vpn.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Get group policies for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllGroupPolicyModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_group_policies
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Select stale group policies
+  ansible.builtin.set_fact:
+    fmcansible_stale_group_policies: >-
+      {{ (cleanup_group_policies | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Delete stale group policies
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteGroupPolicyModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_group_policy.id }}"
+  loop: "{{ fmcansible_stale_group_policies | default([]) }}"
+  loop_control:
+    loop_var: stale_group_policy
+    label: "{{ stale_group_policy.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Get IPv4 address pools for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_ipv4_pools
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Select stale IPv4 address pools
+  ansible.builtin.set_fact:
+    fmcansible_stale_ipv4_pools: >-
+      {{ (cleanup_ipv4_pools | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Delete stale IPv4 address pools
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteIPv4AddressPool
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_ipv4_pool.id }}"
+  loop: "{{ fmcansible_stale_ipv4_pools | default([]) }}"
+  loop_control:
+    loop_var: stale_ipv4_pool
+    label: "{{ stale_ipv4_pool.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Get dynamic access policies for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_dap_policies
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Select stale dynamic access policies
+  ansible.builtin.set_fact:
+    fmcansible_stale_dap_policies: >-
+      {{ (cleanup_dap_policies | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Delete stale dynamic access policies
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_dap_policy.id }}"
+  loop: "{{ fmcansible_stale_dap_policies | default([]) }}"
+  loop_control:
+    loop_var: stale_dap_policy
+    label: "{{ stale_dap_policy.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Get certificate enrollments for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_certificates
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Select stale certificate enrollments
+  ansible.builtin.set_fact:
+    fmcansible_stale_certificates: >-
+      {{ (cleanup_certificates | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Delete stale certificate enrollments
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_certificate.id }}"
+  loop: "{{ fmcansible_stale_certificates | default([]) }}"
+  loop_control:
+    loop_var: stale_certificate
+    label: "{{ stale_certificate.name }}"
+  when: >-
+    fmcansible_platform_matrix[fmcansible_target]
+    .ravpn_create_delete | bool
+
+- name: Get security zones for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllSecurityZoneObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_security_zones
+
+- name: Select stale security zones
+  ansible.builtin.set_fact:
+    fmcansible_stale_security_zones: >-
+      {{ (cleanup_security_zones | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale security zones
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteSecurityZoneObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_security_zone.id }}"
+  loop: "{{ fmcansible_stale_security_zones }}"
+  loop_control:
+    loop_var: stale_security_zone
+    label: "{{ stale_security_zone.name }}"
+
+- name: Get network groups for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllNetworkGroup
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_network_groups
+
+- name: Select stale network groups
+  ansible.builtin.set_fact:
+    fmcansible_stale_network_groups: >-
+      {{ (cleanup_network_groups | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale network groups
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteNetworkGroup
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_network_group.id }}"
+  loop: "{{ fmcansible_stale_network_groups }}"
+  loop_control:
+    loop_var: stale_network_group
+    label: "{{ stale_network_group.name }}"
+
+- name: Get network objects for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllNetworkObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_networks
+
+- name: Select stale network objects
+  ansible.builtin.set_fact:
+    fmcansible_stale_networks: >-
+      {{ (cleanup_networks | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale network objects
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteNetworkObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_network.id }}"
+  loop: "{{ fmcansible_stale_networks }}"
+  loop_control:
+    loop_var: stale_network
+    label: "{{ stale_network.name }}"
+
+- name: Get host objects for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllHostObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_hosts
+
+- name: Select stale host objects
+  ansible.builtin.set_fact:
+    fmcansible_stale_hosts: >-
+      {{ (cleanup_hosts | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Delete stale host objects
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteHostObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_host.id }}"
+  loop: "{{ fmcansible_stale_hosts }}"
+  loop_control:
+    loop_var: stale_host
+    label: "{{ stale_host.name }}"
+
+- name: Re-read resources after cleanup
+  block:
+    - name: Re-read host objects
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_hosts_after
+
+    - name: Re-read network objects
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_networks_after
+
+    - name: Re-read access policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_access_policies_after
+
+    - name: Re-read FTD Platform Settings policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPlatformSettingsPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_platform_policies_after
+
+    - name: Re-read file policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFilePolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_file_policies_after
+
+    - name: Re-read site-to-site VPNs
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDS2SVpnModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_s2s_vpns_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .s2s_create_delete | bool
+
+    - name: Re-read RA VPNs
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDRAVpnModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_ra_vpns_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .ravpn_create_delete | bool
+
+    - name: Re-read group policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllGroupPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_group_policies_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .ravpn_create_delete | bool
+
+    - name: Re-read IPv4 address pools
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllIPv4AddressPool
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_ipv4_pools_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .ravpn_create_delete | bool
+
+    - name: Re-read dynamic access policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDynamicAccessPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_dap_policies_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .ravpn_create_delete | bool
+
+    - name: Re-read certificate enrollments
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllVpnCertEnrollmentModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_certificates_after
+      when: >-
+        fmcansible_platform_matrix[fmcansible_target]
+        .ravpn_create_delete | bool
+
+    - name: Re-read security zones
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllSecurityZoneObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_security_zones_after
+
+    - name: Re-read network groups
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkGroup
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: cleanup_network_groups_after
+
+- name: Select resources remaining after cleanup
+  ansible.builtin.set_fact:
+    fmcansible_remaining_hosts: >-
+      {{ (cleanup_hosts_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_networks: >-
+      {{ (cleanup_networks_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_access_policies: >-
+      {{ (cleanup_access_policies_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_platform_policies: >-
+      {{ (cleanup_platform_policies_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_file_policies: >-
+      {{ (cleanup_file_policies_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_s2s_vpns: >-
+      {{ (cleanup_s2s_vpns_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_ra_vpns: >-
+      {{ (cleanup_ra_vpns_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_group_policies: >-
+      {{ (cleanup_group_policies_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_ipv4_pools: >-
+      {{ (cleanup_ipv4_pools_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_dap_policies: >-
+      {{ (cleanup_dap_policies_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_certificates: >-
+      {{ (cleanup_certificates_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_security_zones: >-
+      {{ (cleanup_security_zones_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+    fmcansible_remaining_network_groups: >-
+      {{ (cleanup_network_groups_after | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'match', '^' ~ fmcansible_cleanup_prefix)
+         | list }}
+
+- name: Verify live-test resources were removed
+  ansible.builtin.assert:
+    that:
+      - fmcansible_remaining_hosts | length == 0
+      - fmcansible_remaining_networks | length == 0
+      - fmcansible_remaining_access_policies | length == 0
+      - fmcansible_remaining_platform_policies | length == 0
+      - fmcansible_remaining_file_policies | length == 0
+      - fmcansible_remaining_s2s_vpns | length == 0
+      - fmcansible_remaining_ra_vpns | length == 0
+      - fmcansible_remaining_group_policies | length == 0
+      - fmcansible_remaining_ipv4_pools | length == 0
+      - fmcansible_remaining_dap_policies | length == 0
+      - fmcansible_remaining_certificates | length == 0
+      - fmcansible_remaining_security_zones | length == 0
+      - fmcansible_remaining_network_groups | length == 0
+    fail_msg: >-
+      Cleanup left prefixed resources behind. Run 99_cleanup.yml after fixing
+      the first reported delete failure; do not start another live test.
+    success_msg: "No prefixed FMCAnsible live-test resources remain."

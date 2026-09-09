@@ -1,0 +1,126 @@
+---
+- name: Get local RAVPN test users for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_local_username }}"
+    register_as: cleanup_ra_local_users
+
+- name: Delete local RAVPN test users
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ra_local_user.id }}"
+  loop: >-
+    {{ (cleanup_ra_local_users | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_local_username)
+       | list }}
+  loop_control:
+    loop_var: cleanup_ra_local_user
+    label: "{{ cleanup_ra_local_user.name }}"
+
+- name: Get local test realms for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_local_realm_name }}"
+    register_as: cleanup_ra_local_realms
+
+- name: Delete local test realms
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ra_local_realm.id }}"
+  register: cleanup_ra_local_realm_delete
+  retries: 3
+  delay: 10
+  until: cleanup_ra_local_realm_delete is succeeded
+  loop: >-
+    {{ (cleanup_ra_local_realms | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_local_realm_name)
+       | list }}
+  loop_control:
+    loop_var: cleanup_ra_local_realm
+    label: "{{ cleanup_ra_local_realm.name }}"
+
+- name: Get AD test realms for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_ad_realm_name }}"
+    register_as: cleanup_ra_ad_realms
+
+- name: Delete AD test realms
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ra_ad_realm.id }}"
+  register: cleanup_ra_ad_realm_delete
+  retries: 3
+  delay: 10
+  until: cleanup_ra_ad_realm_delete is succeeded
+  loop: >-
+    {{ (cleanup_ra_ad_realms | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'equalto', fmcansible_ravpn_ad_realm_name)
+       | list }}
+  loop_control:
+    loop_var: cleanup_ra_ad_realm
+    label: "{{ cleanup_ra_ad_realm.name }}"
+
+- name: Re-read local RAVPN test users after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllLocalRealmUser
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_local_username }}"
+    register_as: cleanup_ra_local_users_after
+
+- name: Re-read AD test realms after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_ad_realm_name }}"
+    register_as: cleanup_ra_ad_realms_after
+
+- name: Re-read local test realms after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_local_realm_name }}"
+    register_as: cleanup_ra_local_realms_after
+
+- name: Assert RAVPN identity cleanup
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cleanup_ra_local_users_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_local_username)
+        | list
+        | length == 0
+      - >-
+        (cleanup_ra_ad_realms_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_ad_realm_name)
+        | list
+        | length == 0
+      - >-
+        (cleanup_ra_local_realms_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_local_realm_name)
+        | list
+        | length == 0

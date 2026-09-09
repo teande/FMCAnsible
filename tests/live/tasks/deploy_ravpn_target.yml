@@ -1,0 +1,70 @@
+---
+- name: Get deployable devices for RAVPN deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: live_ra_deployable_devices
+
+- name: Select the RAVPN target deployment
+  ansible.builtin.set_fact:
+    live_ra_target_deployable_matches: >-
+      {{ (live_ra_deployable_devices | default([]))
+         | selectattr('device.id', 'equalto', fmcansible_ra_target_device.id)
+         | list }}
+
+- name: Require a deployable RAVPN target
+  ansible.builtin.assert:
+    that:
+      - live_ra_target_deployable_matches | length == 1
+      - live_ra_target_deployable_matches[0].canBeDeployed | bool
+      - not live_ra_target_deployable_matches[0].isDeploying | bool
+    fail_msg: >-
+      {{ fmcansible_ra_target_device.name }} is not ready for
+      {{ fmcansible_ravpn_deployment_note }}.
+  when: fmcansible_ravpn_deployment_required | bool
+
+- name: Submit RAVPN deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: createDeploymentRequest
+    data:
+      type: DeploymentRequest
+      version: "{{ live_ra_target_deployable_matches[0].version }}"
+      forceDeploy: false
+      ignoreWarning: true
+      deploymentNote: "{{ fmcansible_ravpn_deployment_note }}"
+      deviceList:
+        - "{{ fmcansible_ra_target_device.id }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+  register: live_ra_deployment
+  when: live_ra_target_deployable_matches | length == 1
+
+- name: Wait for RAVPN deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getTaskStatus
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_ra_deployment.response.metadata.task.id }}"
+    query_params:
+      showDetailedDeviceStatus: true
+  register: live_ra_deployment_status
+  until: >-
+    live_ra_deployment_status.response.status | default('') | upper
+    in ['COMPLETED', 'DEPLOYED', 'FAILED']
+  retries: 80
+  delay: 15
+  when: live_ra_target_deployable_matches | length == 1
+
+- name: Require successful RAVPN deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_ra_deployment_status.response.status | upper
+        in ['COMPLETED', 'DEPLOYED']
+    fail_msg: >-
+      {{ live_ra_deployment_status.response.message
+         | default(fmcansible_ravpn_deployment_note + ' failed') }}
+  when: live_ra_target_deployable_matches | length == 1

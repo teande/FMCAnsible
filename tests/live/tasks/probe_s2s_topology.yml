@@ -1,0 +1,91 @@
+---
+- name: Store S2S topology probe name
+  ansible.builtin.set_fact:
+    fmcansible_s2s_probe_name: >-
+      {{ fmcansible_live_prefix }}-probe-{{ fmcansible_s2s_probe.key }}
+
+- name: Probe and clean up S2S topology shell
+  block:
+    - name: Create S2S topology shell
+      cisco.fmcansible.fmc_configuration:
+        operation: createFTDS2SVpnModel
+        data: >-
+          {{ {
+               'name': fmcansible_s2s_probe_name,
+               'type': 'FTDS2SVpn',
+               'description': fmcansible_live_prefix
+                              ~ ' capability probe',
+               'topologyType': fmcansible_s2s_probe.topologyType,
+               'routeBased': fmcansible_s2s_probe.routeBased,
+               'ikeV1Enabled': false,
+               'ikeV2Enabled': true,
+               'enableEcmpAtHub': false,
+               'enableEcmpAtSpoke': false
+             }
+             | combine(fmcansible_s2s_probe.extra_data | default({}),
+                       recursive=true) }}
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+      register: fmcansible_s2s_probe_create
+      failed_when: false
+
+    - name: Classify S2S topology probe response
+      ansible.builtin.set_fact:
+        fmcansible_s2s_probe_status: >-
+          {{ 'accepted'
+             if (fmcansible_s2s_probe_create.response is defined
+                 and fmcansible_s2s_probe_create.response.id is defined)
+             else 'expected-prerequisite-rejection'
+             if (fmcansible_s2s_probe.allow_rejection | bool
+                 and (fmcansible_s2s_probe_create.msg | default('')
+                      | string
+                      | regex_search('(?i)' ~
+                        fmcansible_s2s_probe.allowed_rejection_regex)))
+             else 'unexpected-rejection' }}
+
+    - name: Read back accepted S2S topology shell
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDS2SVpnModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          objectId: "{{ fmcansible_s2s_probe_create.response.id }}"
+        register_as: fmcansible_s2s_probe_get
+      when: fmcansible_s2s_probe_status == 'accepted'
+
+    - name: Assert accepted S2S topology shell persisted
+      ansible.builtin.assert:
+        that:
+          - >-
+            fmcansible_s2s_probe_get.id
+            == fmcansible_s2s_probe_create.response.id
+          - fmcansible_s2s_probe_get.name == fmcansible_s2s_probe_name
+          - fmcansible_s2s_probe_get.type == 'FTDS2SVpn'
+          - >-
+            fmcansible_s2s_probe_get.topologyType
+            == fmcansible_s2s_probe.topologyType
+          - >-
+            fmcansible_s2s_probe_get.routeBased | bool
+            == fmcansible_s2s_probe.routeBased | bool
+          - fmcansible_s2s_probe_get.ikeV2Enabled | bool
+          - not fmcansible_s2s_probe_get.ikeV1Enabled | bool
+      when: fmcansible_s2s_probe_status == 'accepted'
+
+    - name: Record S2S topology probe response
+      ansible.builtin.set_fact:
+        fmcansible_s2s_topology_probe_results: >-
+          {{ fmcansible_s2s_topology_probe_results
+             + [{
+               'key': fmcansible_s2s_probe.key,
+               'topologyType': fmcansible_s2s_probe.topologyType,
+               'routeBased': fmcansible_s2s_probe.routeBased,
+               'status': fmcansible_s2s_probe_status,
+               'detail': fmcansible_s2s_probe_create.msg
+                         | default('API accepted topology shell')
+             }] }}
+
+  always:
+    - name: Clean up probed S2S topology
+      ansible.builtin.include_tasks: cleanup_s2s_named.yml
+      vars:
+        fmcansible_s2s_vpn_name: "{{ fmcansible_s2s_probe_name }}"
+        fmcansible_s2s_protected_network_names: []

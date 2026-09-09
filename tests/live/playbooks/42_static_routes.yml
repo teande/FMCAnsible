@@ -1,0 +1,406 @@
+---
+- name: Validate IPv4 and IPv6 static route lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Validate static route test input
+      ansible.builtin.assert:
+        that:
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_egress_interface | length > 0
+          - fmcansible_routing_ipv4_gateway | length > 0
+          - fmcansible_routing_initial_metric | int > 0
+          - >-
+            fmcansible_routing_updated_metric | int
+            != fmcansible_routing_initial_metric | int
+
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_routing_domains
+
+    - name: Initialize static route test facts
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_routing_domains[fmcansible_domain_index].uuid }}
+        live_routing_ipv4_object_id: null
+        live_routing_ipv6_object_id: null
+        live_routing_ipv4_route_id: null
+        live_routing_ipv6_route_id: null
+
+    - name: Get managed devices once
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_devices
+
+    - name: Select exact routing test device
+      ansible.builtin.set_fact:
+        live_routing_device_matches: >-
+          {{ (live_routing_devices | default([]))
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', fmcansible_routing_test_device_name)
+             | list }}
+
+    - name: Require exactly one routing test device
+      ansible.builtin.assert:
+        that:
+          - live_routing_device_matches | length == 1
+        fail_msg: >-
+          Expected one managed device named
+          {{ fmcansible_routing_test_device_name }}.
+
+    - name: Store routing test device
+      ansible.builtin.set_fact:
+        fmcansible_routing_device: "{{ live_routing_device_matches[0] }}"
+
+    - name: Create, deploy, update, and remove static routes
+      block:
+        - name: Create IPv4 destination network
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertNetworkObject
+            data:
+              name: "{{ fmcansible_routing_ipv4_network.name }}"
+              value: "{{ fmcansible_routing_ipv4_network.value }}"
+              type: Network
+              description: "{{ fmcansible_live_prefix }} static route test"
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_routing_ipv4_object
+
+        - name: Track IPv4 destination network
+          ansible.builtin.set_fact:
+            live_routing_ipv4_object_id: "{{ live_routing_ipv4_object.id }}"
+
+        - name: Create IPv6 destination network
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertNetworkObject
+            data:
+              name: "{{ fmcansible_routing_ipv6_network.name }}"
+              value: "{{ fmcansible_routing_ipv6_network.value }}"
+              type: Network
+              description: "{{ fmcansible_live_prefix }} static route test"
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_routing_ipv6_object
+
+        - name: Track IPv6 destination network
+          ansible.builtin.set_fact:
+            live_routing_ipv6_object_id: "{{ live_routing_ipv6_object.id }}"
+
+        - name: Read back static route destination networks
+          cisco.fmcansible.fmc_configuration:
+            operation: getNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ routing_network_object.id }}"
+            register_as: live_routing_network_get
+          loop:
+            - id: "{{ live_routing_ipv4_object_id }}"
+              name: "{{ fmcansible_routing_ipv4_network.name }}"
+              value: "{{ fmcansible_routing_ipv4_network.value }}"
+            - id: "{{ live_routing_ipv6_object_id }}"
+              name: "{{ fmcansible_routing_ipv6_network.name }}"
+              value: "{{ fmcansible_routing_ipv6_network.value }}"
+          loop_control:
+            loop_var: routing_network_object
+            label: "{{ routing_network_object.name }}"
+          register: live_routing_network_reads
+
+        - name: Assert destination networks persisted
+          ansible.builtin.assert:
+            that:
+              - network_read.id == network_result.routing_network_object.id
+              - network_read.name == network_result.routing_network_object.name
+              - network_read.value == network_result.routing_network_object.value
+              - network_read.type == 'Network'
+          vars:
+            network_read: >-
+              {{ network_result.ansible_facts.live_routing_network_get }}
+          loop: "{{ live_routing_network_reads.results }}"
+          loop_control:
+            loop_var: network_result
+            label: "{{ network_result.routing_network_object.name }}"
+
+        - name: Create IPv4 next-hop route
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleIPv4StaticRouteModel
+            data:
+              interfaceName: "{{ fmcansible_routing_egress_interface }}"
+              selectedNetworks:
+                - id: "{{ live_routing_ipv4_object_id }}"
+                  name: "{{ fmcansible_routing_ipv4_network.name }}"
+                  type: Network
+              metricValue: "{{ fmcansible_routing_initial_metric }}"
+              gateway:
+                literal:
+                  type: Host
+                  value: "{{ fmcansible_routing_ipv4_gateway }}"
+              type: IPv4StaticRoute
+              isTunneled: false
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            query_params:
+              bulk: false
+            register_as: live_routing_ipv4_route
+
+        - name: Track IPv4 static route
+          ansible.builtin.set_fact:
+            live_routing_ipv4_route_id: "{{ live_routing_ipv4_route.id }}"
+
+        - name: Read back IPv4 route before deployment
+          cisco.fmcansible.fmc_configuration:
+            operation: getIPv4StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv4_route_id }}"
+            register_as: live_routing_ipv4_route_predeploy
+
+        - name: Assert IPv4 route before deployment
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_routing_ipv4_route_predeploy.interfaceName
+                == fmcansible_routing_egress_interface
+              - >-
+                live_routing_ipv4_route_predeploy.gateway.literal.value
+                == fmcansible_routing_ipv4_gateway
+              - live_routing_ipv4_route_predeploy.metricValue | int == fmcansible_routing_initial_metric | int
+              - live_routing_ipv4_object_id in (live_routing_ipv4_route_predeploy.selectedNetworks | map(attribute='id') | list)
+
+        - name: Deploy created IPv4 static route
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} create IPv4 static route
+          when: fmcansible_routing_deploy | bool
+
+        - name: Update IPv4 static route metric
+          cisco.fmcansible.fmc_configuration:
+            operation: updateIPv4StaticRouteModel
+            data:
+              id: "{{ live_routing_ipv4_route_id }}"
+              interfaceName: "{{ fmcansible_routing_egress_interface }}"
+              selectedNetworks:
+                - id: "{{ live_routing_ipv4_object_id }}"
+                  name: "{{ fmcansible_routing_ipv4_network.name }}"
+                  type: Network
+              gateway:
+                literal:
+                  type: Host
+                  value: "{{ fmcansible_routing_ipv4_gateway }}"
+              metricValue: "{{ fmcansible_routing_updated_metric }}"
+              type: IPv4StaticRoute
+              isTunneled: false
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv4_route_id }}"
+
+        - name: Read back updated IPv4 route before deployment
+          cisco.fmcansible.fmc_configuration:
+            operation: getIPv4StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv4_route_id }}"
+            register_as: live_routing_ipv4_route_predeploy_update
+
+        - name: Assert updated IPv4 route before deployment
+          ansible.builtin.assert:
+            that:
+              - live_routing_ipv4_route_predeploy_update.metricValue | int == fmcansible_routing_updated_metric | int
+              - live_routing_ipv4_object_id in (live_routing_ipv4_route_predeploy_update.selectedNetworks | map(attribute='id') | list)
+
+        - name: Deploy updated IPv4 static route
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} update IPv4 static route
+          when: fmcansible_routing_deploy | bool
+
+        - name: Read back updated IPv4 route
+          cisco.fmcansible.fmc_configuration:
+            operation: getIPv4StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv4_route_id }}"
+            register_as: live_routing_ipv4_route_updated
+
+        - name: Assert IPv4 static route update persisted
+          ansible.builtin.assert:
+            that:
+              - live_routing_ipv4_route_updated.metricValue | int == fmcansible_routing_updated_metric | int
+              - live_routing_ipv4_object_id in (live_routing_ipv4_route_updated.selectedNetworks | map(attribute='id') | list)
+              - >-
+                live_routing_ipv4_route_updated.gateway.literal.value
+                == fmcansible_routing_ipv4_gateway
+
+        - name: Create IPv6 Null0 route
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleIPv6StaticRouteModel
+            data:
+              interfaceName: Null0
+              selectedNetworks:
+                - id: "{{ live_routing_ipv6_object_id }}"
+                  name: "{{ fmcansible_routing_ipv6_network.name }}"
+                  type: Network
+              metricValue: "{{ fmcansible_routing_initial_metric }}"
+              type: IPv6StaticRoute
+              isTunneled: false
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            query_params:
+              bulk: false
+            register_as: live_routing_ipv6_route
+
+        - name: Track IPv6 static route
+          ansible.builtin.set_fact:
+            live_routing_ipv6_route_id: "{{ live_routing_ipv6_route.id }}"
+
+        - name: Read back created IPv6 route
+          cisco.fmcansible.fmc_configuration:
+            operation: getIPv6StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv6_route_id }}"
+            register_as: live_routing_ipv6_route_get
+
+        - name: Assert IPv6 route persisted exactly
+          ansible.builtin.assert:
+            that:
+              - live_routing_ipv6_route_get.interfaceName == 'Null0'
+              - >-
+                live_routing_ipv6_route_get.metricValue | int
+                == fmcansible_routing_initial_metric | int
+              - live_routing_ipv6_route_get.type == 'IPv6StaticRoute'
+              - not live_routing_ipv6_route_get.isTunneled | bool
+              - >-
+                live_routing_ipv6_object_id in
+                (live_routing_ipv6_route_get.selectedNetworks
+                 | map(attribute='id') | list)
+
+        - name: Deploy created IPv6 static route
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} create IPv6 static route
+          when:
+            - fmcansible_routing_deploy | bool
+            - fmcansible_routing_ipv6_deploy | bool
+
+      always:
+        - name: Delete IPv4 static route
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteIPv4StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv4_route_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - live_routing_ipv4_route_id is not none
+
+        - name: Delete IPv6 static route
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteIPv6StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ live_routing_ipv6_route_id }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - live_routing_ipv6_route_id is not none
+
+        - name: Delete static route destination networks
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ routing_network_object.id }}"
+          loop:
+            - id: "{{ live_routing_ipv4_object_id }}"
+              name: "{{ fmcansible_routing_ipv4_network.name }}"
+            - id: "{{ live_routing_ipv6_object_id }}"
+              name: "{{ fmcansible_routing_ipv6_network.name }}"
+          loop_control:
+            loop_var: routing_network_object
+            label: "{{ routing_network_object.name | default('not-created') }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - routing_network_object.id is not none
+
+        - name: Deploy static route cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: >-
+              {{ fmcansible_live_prefix }} remove static routes
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - fmcansible_routing_deploy | bool
+            - >-
+              live_routing_ipv4_route_id is not none
+              or live_routing_ipv6_route_id is not none
+
+    - name: Read static routes after cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: "{{ routing_cleanup_target.operation }}"
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        register_as: live_routing_routes_after_cleanup
+      loop:
+        - operation: getAllIPv4StaticRouteModel
+          id: "{{ live_routing_ipv4_route_id }}"
+        - operation: getAllIPv6StaticRouteModel
+          id: "{{ live_routing_ipv6_route_id }}"
+      loop_control:
+        loop_var: routing_cleanup_target
+      register: live_routing_route_cleanup_reads
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Assert static routes were removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            route_cleanup_result.routing_cleanup_target.id
+            not in
+            (route_cleanup_result.ansible_facts.live_routing_routes_after_cleanup
+             | default([])
+             | map(attribute='id')
+             | list)
+      loop: "{{ live_routing_route_cleanup_reads.results }}"
+      loop_control:
+        loop_var: route_cleanup_result
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Read network objects after cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_routing_networks_after_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Assert static route destination networks were removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_routing_networks_after_cleanup
+            | selectattr('name', 'in', routing_network_names)
+            | list
+            | length == 0
+      vars:
+        routing_network_names:
+          - "{{ fmcansible_routing_ipv4_network.name }}"
+          - "{{ fmcansible_routing_ipv6_network.name }}"
+      when: fmcansible_cleanup_after_test | bool

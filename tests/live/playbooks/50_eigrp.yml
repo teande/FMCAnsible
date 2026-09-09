@@ -1,0 +1,190 @@
+---
+- name: Validate deployed FMC EIGRP lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_phase: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PHASE') | default('build', true) }}"
+    fmcansible_routing_interface_name: "{{ lookup('env', 'FMCANSIBLE_ROUTING_INTERFACE') }}"
+    eigrp_network_name: "{{ fmcansible_live_prefix }}-eigrp-network"
+  tasks:
+    - name: Validate EIGRP test inputs
+      ansible.builtin.assert:
+        that:
+          - routing_phase in ['build', 'cleanup']
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_interface_name | length > 0
+
+    - name: Discover routing context
+      ansible.builtin.include_tasks: ../tasks/dynamic_routing_context.yml
+
+    - name: Read EIGRP processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllEigrpPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: eigrp_existing
+
+    - name: Read network objects
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        query_params:
+          expanded: true
+        register_as: eigrp_network_objects
+
+    - name: Select this test's EIGRP resources
+      ansible.builtin.set_fact:
+        eigrp_matches: >-
+          {{ eigrp_existing
+             | selectattr('asNumber', 'defined')
+             | selectattr('asNumber', 'equalto', '100')
+             | list }}
+        eigrp_network_matches: >-
+          {{ eigrp_network_objects
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', eigrp_network_name)
+             | list }}
+
+    - name: Refuse duplicate EIGRP test resources
+      ansible.builtin.assert:
+        that:
+          - eigrp_matches | length <= 1
+          - eigrp_network_matches | length <= 1
+
+    - name: Build and verify EIGRP configuration
+      when: routing_phase == 'build'
+      block:
+        - name: Create or verify EIGRP network object
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleNetworkObject
+            data:
+              name: "{{ eigrp_network_name }}"
+              value: "{{ fmcansible_routing_transit_network }}"
+              type: networkobject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: eigrp_network
+          register: eigrp_network_result
+
+        - name: Create or verify EIGRP process
+          cisco.fmcansible.fmc_configuration:
+            operation: createEigrpPolicyModel
+            data:
+              type: EigrpRoute
+              asNumber: '100'
+              basicConfiguration:
+                autoSummary: false
+                networks:
+                  - id: "{{ eigrp_network.id }}"
+                    name: "{{ eigrp_network.name }}"
+                    type: Network
+              advancedConfiguration:
+                routerId: "{{ fmcansible_routing_ftd_ipv4_address }}"
+                logNeighborChanges: true
+                enableLogNeighborWarnings: true
+                logNeighborWarningInterval: 10
+              eigrpInterfaces:
+                - deviceInterface:
+                    id: "{{ fmcansible_routing_interface.id }}"
+                    name: "{{ fmcansible_routing_interface.name }}"
+                    type: PhysicalInterface
+                  eigrpProtocolConfiguration:
+                    splitHorizon: true
+                    timers:
+                      helloInterval: 5
+                      holdTime: 15
+                      delay: 1
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: eigrp_created
+          register: eigrp_result
+
+        - name: Read back EIGRP process
+          cisco.fmcansible.fmc_configuration:
+            operation: getEigrpPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ eigrp_created.id }}"
+            register_as: eigrp_readback
+
+        - name: Assert exact EIGRP configuration persisted
+          ansible.builtin.assert:
+            that:
+              - eigrp_readback.asNumber == '100'
+              - eigrp_readback.basicConfiguration.autoSummary == false
+              - eigrp_readback.basicConfiguration.networks | length == 1
+              - eigrp_readback.basicConfiguration.networks[0].id == eigrp_network.id
+              - >-
+                eigrp_readback.advancedConfiguration.routerId
+                == fmcansible_routing_ftd_ipv4_address
+              - eigrp_readback.eigrpInterfaces | length == 1
+              - eigrp_readback.eigrpInterfaces[0].deviceInterface.id == fmcansible_routing_interface.id
+              - eigrp_readback.eigrpInterfaces[0].eigrpProtocolConfiguration.timers.helloInterval == 5
+              - eigrp_readback.eigrpInterfaces[0].eigrpProtocolConfiguration.timers.holdTime == 15
+
+        - name: Deploy EIGRP configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} configure EIGRP"
+          when: >-
+            (eigrp_network_result.changed | bool)
+            or (eigrp_result.changed | bool)
+
+    - name: Remove and verify EIGRP configuration
+      when: routing_phase == 'cleanup'
+      block:
+        - name: Delete EIGRP process
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteEigrpPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ eigrp_matches[0].id }}"
+          when: eigrp_matches | length == 1
+
+        - name: Delete EIGRP network object
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ eigrp_object.id }}"
+          loop: "{{ eigrp_network_matches }}"
+          loop_control:
+            loop_var: eigrp_object
+            label: "{{ eigrp_object.name }}"
+
+        - name: Deploy EIGRP cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} remove EIGRP"
+          when: eigrp_matches | length == 1
+
+        - name: Read EIGRP processes after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllEigrpPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: eigrp_after_cleanup
+
+        - name: Read network objects after EIGRP cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: eigrp_objects_after_cleanup
+
+        - name: Assert EIGRP resources were removed
+          ansible.builtin.assert:
+            that:
+              - "'100' not in (eigrp_after_cleanup | map(attribute='asNumber', default='') | list)"
+              - eigrp_network_name not in (eigrp_objects_after_cleanup | map(attribute='name', default='') | list)

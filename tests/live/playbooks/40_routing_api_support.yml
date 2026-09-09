@@ -1,0 +1,165 @@
+---
+- name: Validate routing API support on a managed FTD
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled routing API test
+      ansible.builtin.debug:
+        msg: "Routing API support test is disabled."
+      when: not fmcansible_run_routing_api_tests | bool
+
+    - name: Query routing APIs
+      when: fmcansible_run_routing_api_tests | bool
+      block:
+        - name: Validate routing test input
+          ansible.builtin.assert:
+            that:
+              - fmcansible_routing_test_device_name | length > 0
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_routing_domains
+
+        - name: Store routing test domain UUID
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_routing_domains[fmcansible_domain_index].uuid }}
+
+        - name: Get managed devices
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_routing_devices
+
+        - name: Select exact routing test device
+          ansible.builtin.set_fact:
+            fmcansible_routing_device_matches: >-
+              {{ (live_routing_devices | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_routing_test_device_name)
+                 | list }}
+
+        - name: Require exactly one routing test device
+          ansible.builtin.assert:
+            that:
+              - fmcansible_routing_device_matches | length == 1
+
+        - name: Store routing test device
+          ansible.builtin.set_fact:
+            fmcansible_routing_device: "{{ fmcansible_routing_device_matches[0] }}"
+
+        - name: Query ECMP zones
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllECMPZoneModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ecmp_zones
+
+        - name: Query IPv4 static routes
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIPv4StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ipv4_static
+
+        - name: Query IPv6 static routes
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIPv6StaticRouteModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ipv6_static
+
+        - name: Query EIGRP policies
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllEigrpPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_eigrp
+
+        - name: Query BGP general settings
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllBGPGeneralSettingModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_bgp_general
+
+        - name: Query BGP address families and neighbors
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllBGPIPvAddressFamilyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_bgp_address_families
+
+        - name: Query OSPFv2 policies and neighbors
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ospfv2
+
+        - name: Query OSPFv2 interface policies
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfInterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ospfv2_interfaces
+
+        - name: Query OSPFv3 policies
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfv3PolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ospfv3
+
+        - name: Query OSPFv3 interface and neighbor policies
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfv3InterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: live_routing_ospfv3_interfaces
+
+        - name: Assert all routing collection endpoints responded
+          ansible.builtin.assert:
+            that:
+              - live_routing_ecmp_zones is defined
+              - live_routing_ipv4_static is defined
+              - live_routing_ipv6_static is defined
+              - live_routing_eigrp is defined
+              - live_routing_bgp_general is defined
+              - live_routing_bgp_address_families is defined
+              - live_routing_ospfv2 is defined
+              - live_routing_ospfv2_interfaces is defined
+              - live_routing_ospfv3 is defined
+              - live_routing_ospfv3_interfaces is defined
+
+        - name: Report current routing object counts
+          ansible.builtin.debug:
+            msg:
+              device: "{{ fmcansible_routing_device.name }}"
+              ecmp: "{{ live_routing_ecmp_zones | length }}"
+              ipv4_static: "{{ live_routing_ipv4_static | length }}"
+              ipv6_static: "{{ live_routing_ipv6_static | length }}"
+              eigrp: "{{ live_routing_eigrp | length }}"
+              bgp_general: "{{ live_routing_bgp_general | length }}"
+              bgp_address_families: >-
+                {{ live_routing_bgp_address_families | length }}
+              ospfv2: "{{ live_routing_ospfv2 | length }}"
+              ospfv2_interfaces: "{{ live_routing_ospfv2_interfaces | length }}"
+              ospfv3: "{{ live_routing_ospfv3 | length }}"
+              ospfv3_interfaces: "{{ live_routing_ospfv3_interfaces | length }}"

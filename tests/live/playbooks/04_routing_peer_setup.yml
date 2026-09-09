@@ -1,0 +1,144 @@
+---
+- name: Prepare dedicated routing and traffic peers
+  hosts: routing_peers
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Require a Debian-family routing peer
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+
+    - name: Install routing and traffic packages
+      ansible.builtin.apt:
+        name:
+          - frr
+          - frr-pythontools
+          - iperf3
+          - qemu-guest-agent
+          - tcpdump
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Configure IP forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-fmcansible-routing.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          net.ipv4.ip_forward=1
+          net.ipv6.conf.all.forwarding=1
+      register: routing_peer_sysctl
+
+    - name: Apply IP forwarding settings
+      ansible.builtin.command: sysctl --system
+      when: routing_peer_sysctl.changed
+      changed_when: true
+
+    - name: Check for FRR EIGRP support
+      ansible.builtin.stat:
+        path: /usr/lib/frr/eigrpd
+      register: routing_peer_eigrpd
+
+    - name: Enable FRR routing daemons
+      ansible.builtin.lineinfile:
+        path: /etc/frr/daemons
+        regexp: "^{{ routing_daemon }}="
+        line: "{{ routing_daemon }}=yes"
+      loop:
+        - bgpd
+        - ospfd
+        - ospf6d
+      loop_control:
+        loop_var: routing_daemon
+      notify: Restart FRR
+
+    - name: Enable FRR EIGRP daemon when packaged
+      ansible.builtin.lineinfile:
+        path: /etc/frr/daemons
+        regexp: '^eigrpd='
+        line: eigrpd=yes
+      when: routing_peer_eigrpd.stat.exists
+      notify: Restart FRR
+
+    - name: Install baseline FRR configuration
+      ansible.builtin.copy:
+        dest: /etc/frr/frr.conf
+        owner: frr
+        group: frr
+        mode: '0640'
+        content: |
+          frr defaults traditional
+          hostname {{ inventory_hostname }}
+          service integrated-vtysh-config
+          log syslog informational
+      notify: Restart FRR
+
+    - name: Enable integrated vtysh configuration
+      ansible.builtin.lineinfile:
+        path: /etc/frr/vtysh.conf
+        regexp: '^service integrated-vtysh-config$'
+        line: service integrated-vtysh-config
+        create: true
+        owner: frr
+        group: frr
+        mode: '0640'
+      notify: Restart FRR
+
+    - name: Install iperf3 listener service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fmcansible-iperf3.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=FMCAnsible CI iperf3 listener
+          After=network-online.target
+
+          [Service]
+          ExecStart=/usr/bin/iperf3 --server
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Reload systemd
+
+    - name: Enable and start routing peer services
+      ansible.builtin.systemd_service:
+        name: "{{ routing_peer_service }}"
+        daemon_reload: true
+        enabled: true
+        state: started
+      loop:
+        - frr
+        - fmcansible-iperf3
+        - qemu-guest-agent
+      loop_control:
+        loop_var: routing_peer_service
+
+    - name: Apply pending FRR changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read FRR version
+      ansible.builtin.command: vtysh -c 'show version'
+      register: routing_peer_frr_version
+      changed_when: false
+
+    - name: Verify routing peer interfaces and FRR
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.default_ipv4.address | default('') | length > 0
+          - "'FRRouting' in routing_peer_frr_version.stdout"
+
+  handlers:
+    - name: Restart FRR
+      ansible.builtin.systemd_service:
+        name: frr
+        state: restarted
+
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true

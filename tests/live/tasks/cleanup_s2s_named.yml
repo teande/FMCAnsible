@@ -1,0 +1,63 @@
+---
+- name: Get S2S VPNs for named cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_s2s_vpn_name }}"
+    register_as: cleanup_named_s2s_vpns
+
+- name: Select exact S2S VPNs for named cleanup
+  ansible.builtin.set_fact:
+    fmcansible_named_s2s_vpns: >-
+      {{ (cleanup_named_s2s_vpns | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', fmcansible_s2s_vpn_name)
+         | list }}
+
+- name: Delete named S2S VPNs and endpoints
+  ansible.builtin.include_tasks: cleanup_s2s_vpn.yml
+  loop: "{{ fmcansible_named_s2s_vpns }}"
+  loop_control:
+    loop_var: stale_s2s_vpn
+    label: "{{ stale_s2s_vpn.name }}"
+
+- name: Get network objects for named S2S cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllNetworkObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_named_s2s_networks
+
+- name: Delete named S2S protected network objects
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteNetworkObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_named_s2s_network.id }}"
+  loop: >-
+    {{ (cleanup_named_s2s_networks | default([]))
+       | selectattr('name', 'defined')
+       | selectattr('name', 'in', fmcansible_s2s_protected_network_names)
+       | list }}
+  loop_control:
+    loop_var: cleanup_named_s2s_network
+    label: "{{ cleanup_named_s2s_network.name }}"
+
+- name: Re-read network objects after named S2S cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllNetworkObject
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: cleanup_named_s2s_networks_after
+
+- name: Assert named S2S network objects were removed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cleanup_named_s2s_networks_after | default([]))
+        | selectattr('name', 'defined')
+        | selectattr('name', 'in', fmcansible_s2s_protected_network_names)
+        | list
+        | length == 0

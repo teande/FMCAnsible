@@ -1,0 +1,49 @@
+---
+- name: Get endpoints for stale S2S VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_s2s_vpn.id }}"
+    query_params:
+      expanded: true
+    register_as: cleanup_s2s_endpoints
+
+- name: Order S2S endpoint deletion with spokes first
+  ansible.builtin.set_fact:
+    cleanup_s2s_ordered_endpoints: >-
+      {{ cleanup_s2s_endpoints
+         | default([])
+         | sort(attribute='peerType', reverse=true) }}
+
+- name: Delete endpoints for stale S2S VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteVpnEndpoint
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_s2s_vpn.id }}"
+      objectId: "{{ stale_s2s_endpoint.id }}"
+  loop: "{{ cleanup_s2s_ordered_endpoints | default([]) }}"
+  loop_control:
+    loop_var: stale_s2s_endpoint
+    label: "{{ stale_s2s_endpoint.name | default(stale_s2s_endpoint.id) }}"
+
+- name: Re-read endpoints after S2S VPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ stale_s2s_vpn.id }}"
+    register_as: cleanup_s2s_endpoints_after
+
+- name: Assert S2S VPN endpoints were removed
+  ansible.builtin.assert:
+    that:
+      - (cleanup_s2s_endpoints_after | default([])) | length == 0
+
+- name: Delete stale S2S VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ stale_s2s_vpn.id }}"

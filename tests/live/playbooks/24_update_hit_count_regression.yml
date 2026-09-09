@@ -1,0 +1,46 @@
+---
+- name: Validate bodyless operational PUT dispatch
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: hit_count_domains
+
+    - name: Get access policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessPolicy
+        path_params:
+          domainUUID: "{{ hit_count_domains[0].uuid }}"
+        register_as: hit_count_access_policies
+
+    - name: Get managed devices
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ hit_count_domains[0].uuid }}"
+        register_as: hit_count_devices
+
+    - name: Require an access policy and managed device
+      ansible.builtin.assert:
+        that:
+          - hit_count_access_policies | length > 0
+          - hit_count_devices | length > 0
+
+    - name: Refresh access-rule hit counts
+      cisco.fmcansible.fmc_configuration:
+        operation: updateHitCount
+        path_params:
+          domainUUID: "{{ hit_count_domains[0].uuid }}"
+          containerUUID: "{{ hit_count_access_policies[0].id }}"
+        query_params:
+          filter: "deviceId:{{ hit_count_devices[0].id }}"
+      register: hit_count_refresh
+
+    - name: Assert hit-count refresh reached the FMC API
+      ansible.builtin.assert:
+        that:
+          - hit_count_refresh is changed
+          - hit_count_refresh.response is mapping

@@ -1,0 +1,16 @@
+---
+all:
+  vars:
+    ansible_connection: httpapi
+    ansible_network_os: cisco.fmcansible.fmc
+    ansible_httpapi_port: 443
+    ansible_httpapi_use_ssl: true
+    ansible_httpapi_validate_certs: false
+    ansible_command_timeout: 180
+    fmcansible_target: onprem
+  hosts:
+    fmc_onprem:
+      ansible_host: >-
+        {{ lookup('env', 'FMC_HOST') | default('192.0.2.10', true) }}
+      ansible_user: "{{ lookup('env', 'FMC_USERNAME') }}"
+      ansible_password: "{{ lookup('env', 'FMC_PASSWORD') }}"

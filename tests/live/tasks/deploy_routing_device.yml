@@ -1,0 +1,71 @@
+---
+- name: Get deployable devices for routing deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: live_routing_deployable_devices
+
+- name: Select routing test device for deployment
+  ansible.builtin.set_fact:
+    live_routing_deployable_matches: >-
+      {{ (live_routing_deployable_devices | default([]))
+         | selectattr('device.id', 'equalto', fmcansible_routing_device.id)
+         | list }}
+
+- name: Require routing test device to be deployable
+  ansible.builtin.assert:
+    that:
+      - live_routing_deployable_matches | length == 1
+      - live_routing_deployable_matches[0].canBeDeployed | bool
+      - not live_routing_deployable_matches[0].isDeploying | bool
+    fail_msg: >-
+      Routing test device {{ fmcansible_routing_device.name }} is not ready
+      for {{ fmcansible_routing_deployment_note }}.
+
+- name: Submit routing deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: createDeploymentRequest
+    data:
+      type: DeploymentRequest
+      version: "0"
+      forceDeploy: false
+      ignoreWarning: true
+      deploymentNote: "{{ fmcansible_routing_deployment_note }}"
+      deviceList:
+        - "{{ fmcansible_routing_device.id }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+  register: live_routing_deployment
+
+- name: Wait for routing deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getTaskStatus
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ live_routing_deployment.response.metadata.task.id }}"
+    query_params:
+      showDetailedDeviceStatus: true
+  register: live_routing_deployment_status
+  until: >-
+    live_routing_deployment_status.response.status | default('') | upper
+    in ['COMPLETED', 'DEPLOYED', 'FAILED']
+  retries: 80
+  delay: 15
+
+- name: Require successful routing deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        live_routing_deployment_status.response.status | upper
+        in ['COMPLETED', 'DEPLOYED']
+      - >-
+        live_routing_deployment_status.response.subTasks | default([])
+        | rejectattr('status', 'equalto', 'SUCCEEDED')
+        | list
+        | length == 0
+    fail_msg: >-
+      {{ live_routing_deployment_status.response.message
+         | default(fmcansible_routing_deployment_note + ' failed') }}

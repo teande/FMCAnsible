@@ -1,0 +1,88 @@
+---
+- name: Get route-based S2S VTIs for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_vtis_for_cleanup
+
+- name: Delete this run's route-based S2S VTI
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ route_vti_for_cleanup.id }}"
+  loop: >-
+    {{ (live_route_vtis_for_cleanup | default([]))
+       | selectattr('ifname', 'defined')
+       | selectattr('ifname', 'equalto', route_endpoint.tunnel_ifname)
+       | list }}
+  loop_control:
+    loop_var: route_vti_for_cleanup
+    label: "{{ route_vti_for_cleanup.ifname }}"
+
+- name: Get route-based S2S loopbacks for cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_loopbacks_for_cleanup
+
+- name: Delete this run's route-based S2S loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+      objectId: "{{ route_loopback_for_cleanup.id }}"
+  loop: >-
+    {{ (live_route_loopbacks_for_cleanup | default([]))
+       | selectattr('ifname', 'defined')
+       | selectattr('ifname', 'equalto', route_endpoint.loopback_ifname)
+       | list }}
+  loop_control:
+    loop_var: route_loopback_for_cleanup
+    label: "{{ route_loopback_for_cleanup.ifname }}"
+
+- name: Re-read route-based S2S VTIs after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_vtis_after_cleanup
+
+- name: Re-read route-based S2S loopbacks after cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ route_endpoint.device.id }}"
+    query_params:
+      expanded: true
+    register_as: live_route_loopbacks_after_cleanup
+
+- name: Assert route-based S2S interfaces were removed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (live_route_vtis_after_cleanup | default([]))
+        | selectattr('ifname', 'defined')
+        | selectattr('ifname', 'equalto', route_endpoint.tunnel_ifname)
+        | list
+        | length == 0
+      - >-
+        (live_route_loopbacks_after_cleanup | default([]))
+        | selectattr('ifname', 'defined')
+        | selectattr('ifname', 'equalto', route_endpoint.loopback_ifname)
+        | list
+        | length == 0

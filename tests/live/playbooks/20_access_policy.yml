@@ -1,0 +1,72 @@
+---
+- name: Validate access policy create and delete
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Store domain UUID
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+        fmcansible_created_access_policy: {}
+
+    - name: Create, validate, and clean up access policy
+      block:
+        - name: Create access policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createAccessPolicy
+            data:
+              type: AccessPolicy
+              name: "{{ fmcansible_access_policy_name }}"
+              defaultAction:
+                action: BLOCK
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_access_policy
+
+        - name: Track access policy ID
+          ansible.builtin.set_fact:
+            fmcansible_created_access_policy: "{{ live_access_policy }}"
+
+        - name: Read back access policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getAccessPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_access_policy.id }}"
+            register_as: live_access_policy_get
+
+        - name: Assert access policy persisted
+          ansible.builtin.assert:
+            that:
+              - live_access_policy_get.id == fmcansible_created_access_policy.id
+              - live_access_policy_get.name == fmcansible_access_policy_name
+              - live_access_policy_get.type == 'AccessPolicy'
+              - live_access_policy_get.defaultAction.action == 'BLOCK'
+      always:
+        - name: Delete created access policy and any rules
+          ansible.builtin.include_tasks: ../tasks/cleanup_access_policy.yml
+          vars:
+            stale_access_policy: "{{ fmcansible_created_access_policy }}"
+          when: fmcansible_created_access_policy.id is defined
+
+    - name: Verify access policy was removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        filters:
+          name: "{{ fmcansible_access_policy_name }}"
+        register_as: live_access_policy_after_cleanup
+
+    - name: Assert access policy cleanup
+      ansible.builtin.assert:
+        that:
+          - (live_access_policy_after_cleanup | default([])) | length == 0

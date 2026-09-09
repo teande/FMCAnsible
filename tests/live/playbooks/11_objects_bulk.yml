@@ -1,0 +1,108 @@
+---
+- name: Validate bulk object create and delete
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Store domain UUID
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+        fmcansible_created_bulk_hosts: []
+
+    - name: Create, validate, and clean up bulk host objects
+      block:
+        - name: Create host objects in bulk
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data: >-
+              {{ fmcansible_object_bulk
+                 | map('combine', {'type': 'Host',
+                                   'description': fmcansible_live_prefix})
+                 | list }}
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            query_params:
+              bulk: true
+            register_as: live_bulk_hosts
+
+        - name: Track bulk host object IDs
+          ansible.builtin.set_fact:
+            fmcansible_created_bulk_hosts: "{{ live_bulk_hosts }}"
+
+        - name: Assert all bulk objects were returned
+          ansible.builtin.assert:
+            that:
+              - live_bulk_hosts | length == fmcansible_object_bulk | length
+
+        - name: Read back every bulk host object
+          cisco.fmcansible.fmc_configuration:
+            operation: getHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ created_bulk_host.id }}"
+            register_as: live_bulk_host_get
+          loop: "{{ live_bulk_hosts }}"
+          loop_control:
+            loop_var: created_bulk_host
+            label: "{{ created_bulk_host.name }}"
+          register: live_bulk_host_read_results
+
+        - name: Assert every bulk host object persisted
+          ansible.builtin.assert:
+            that:
+              - bulk_host_get.id == bulk_host_result.created_bulk_host.id
+              - bulk_host_get.name == expected_bulk_host.name
+              - bulk_host_get.type == 'Host'
+              - bulk_host_get.value == expected_bulk_host.value
+              - bulk_host_get.description == fmcansible_live_prefix
+            fail_msg: >-
+              Bulk host read-back mismatch for
+              {{ bulk_host_result.created_bulk_host.name }}.
+          vars:
+            bulk_host_get: "{{ bulk_host_result.ansible_facts.live_bulk_host_get }}"
+            expected_bulk_host: >-
+              {{ fmcansible_object_bulk
+                 | selectattr('name', 'equalto', bulk_host_get.name)
+                 | first }}
+          loop: "{{ live_bulk_host_read_results.results }}"
+          loop_control:
+            loop_var: bulk_host_result
+            label: "{{ bulk_host_result.created_bulk_host.name }}"
+      always:
+        - name: Delete bulk host objects
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ created_bulk_host.id }}"
+          loop: "{{ fmcansible_created_bulk_hosts }}"
+          loop_control:
+            loop_var: created_bulk_host
+            label: "{{ created_bulk_host.name | default(created_bulk_host.id) }}"
+          when: fmcansible_cleanup_after_test | bool
+
+    - name: Verify bulk host objects were removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: live_hosts_after_bulk_cleanup
+      when: fmcansible_cleanup_after_test | bool
+
+    - name: Assert bulk host cleanup
+      ansible.builtin.assert:
+        that:
+          - >-
+            (live_hosts_after_bulk_cleanup | default([]))
+            | selectattr('name', 'in', fmcansible_object_bulk | map(attribute='name') | list)
+            | list
+            | length == 0
+      when: fmcansible_cleanup_after_test | bool

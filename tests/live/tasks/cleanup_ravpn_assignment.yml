@@ -1,0 +1,60 @@
+---
+- name: Get expanded policy assignments for RAVPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: cleanup_ra_policy_assignments
+
+- name: Select this run's RAVPN policy assignment
+  ansible.builtin.set_fact:
+    cleanup_ra_assignment_matches: >-
+      {{ (cleanup_ra_policy_assignments | default([]))
+         | selectattr('policy', 'defined')
+         | selectattr('policy.id', 'equalto', live_ra_vpn.id)
+         | list }}
+
+- name: Unassign this run's RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: updatePolicyAssignment
+    data:
+      id: "{{ cleanup_ra_assignment.id }}"
+      type: PolicyAssignment
+      policy:
+        id: "{{ cleanup_ra_assignment.policy.id }}"
+        name: "{{ cleanup_ra_assignment.policy.name }}"
+        type: "{{ cleanup_ra_assignment.policy.type }}"
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ra_assignment.id }}"
+  loop: "{{ cleanup_ra_assignment_matches }}"
+  loop_control:
+    loop_var: cleanup_ra_assignment
+    label: "{{ cleanup_ra_assignment.policy.name }}"
+
+- name: Re-read policy assignments after RAVPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: cleanup_ra_policy_assignments_after
+
+- name: Select the unassigned RAVPN policy
+  ansible.builtin.set_fact:
+    cleanup_ra_assignment_after_matches: >-
+      {{ (cleanup_ra_policy_assignments_after | default([]))
+         | selectattr('policy', 'defined')
+         | selectattr('policy.id', 'equalto', live_ra_vpn.id)
+         | list }}
+
+- name: Assert the RAVPN policy has no assigned targets
+  ansible.builtin.assert:
+    that:
+      - >-
+        cleanup_ra_assignment_after_matches | length == 0 or
+        (cleanup_ra_assignment_after_matches[0].targets | default([])
+         | length == 0)

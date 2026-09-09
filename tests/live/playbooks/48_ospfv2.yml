@@ -1,0 +1,322 @@
+---
+- name: Validate deployed FMC OSPFv2 lifecycle
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_phase: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PHASE') | default('build', true) }}"
+    fmcansible_routing_interface_name: "{{ lookup('env', 'FMCANSIBLE_ROUTING_INTERFACE') }}"
+    ospf_network_name: "{{ fmcansible_live_prefix }}-ospf-network"
+    ospf_neighbor_name: "{{ fmcansible_live_prefix }}-ospf-neighbor"
+  tasks:
+    - name: Validate OSPFv2 test inputs
+      ansible.builtin.assert:
+        that:
+          - routing_phase in ['build', 'cleanup']
+          - fmcansible_routing_test_device_name | length > 0
+          - fmcansible_routing_interface_name | length > 0
+
+    - name: Discover routing context
+      ansible.builtin.include_tasks: ../tasks/dynamic_routing_context.yml
+
+    - name: Read OSPFv2 processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: ospf_existing
+
+    - name: Read OSPFv2 interface policies
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfInterfacePolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: ospf_interface_existing
+
+    - name: Read network objects
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllNetworkObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        query_params:
+          expanded: true
+        register_as: ospf_network_objects
+
+    - name: Read host objects
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        query_params:
+          expanded: true
+        register_as: ospf_host_objects
+
+    - name: Select this test's OSPFv2 resources
+      ansible.builtin.set_fact:
+        ospf_matches: >-
+          {{ ospf_existing
+             | selectattr('processId', 'defined')
+             | selectattr('processId', 'equalto', '1')
+             | list }}
+        ospf_interface_matches: >-
+          {{ ospf_interface_existing
+             | selectattr('deviceInterface.id', 'defined')
+             | selectattr('deviceInterface.id', 'equalto', fmcansible_routing_interface.id)
+             | list }}
+        ospf_network_matches: >-
+          {{ ospf_network_objects
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', ospf_network_name)
+             | list }}
+        ospf_neighbor_matches: >-
+          {{ ospf_host_objects
+             | selectattr('name', 'defined')
+             | selectattr('name', 'equalto', ospf_neighbor_name)
+             | list }}
+
+    - name: Refuse duplicate OSPFv2 test resources
+      ansible.builtin.assert:
+        that:
+          - ospf_matches | length <= 1
+          - ospf_interface_matches | length <= 1
+          - ospf_network_matches | length <= 1
+          - ospf_neighbor_matches | length <= 1
+
+    - name: Build and verify OSPFv2 configuration
+      when: routing_phase == 'build'
+      block:
+        - name: Create or verify OSPF area network object
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleNetworkObject
+            data:
+              name: "{{ ospf_network_name }}"
+              value: "{{ fmcansible_routing_transit_network }}"
+              type: networkobject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: ospf_network
+          register: ospf_network_result
+
+        - name: Create or verify OSPF neighbor object
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data:
+              name: "{{ ospf_neighbor_name }}"
+              value: "{{ fmcansible_routing_peer_ipv4_address }}"
+              type: Host
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: ospf_neighbor
+          register: ospf_neighbor_result
+
+        - name: Create or verify OSPFv2 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createOspfInterfacePolicyModel
+            data:
+              type: OspfInterface
+              deviceInterface:
+                id: "{{ fmcansible_routing_interface.id }}"
+                name: "{{ fmcansible_routing_interface.name }}"
+                type: PhysicalInterface
+              ospfProtocolConfiguration:
+                enableBFD: false
+                filterOutgoingLSA: false
+                ignoreMtuMismatch: false
+                packetCost: 10
+                priority: 1
+                ptpNonBroadcast: true
+                retransmitInterval: 5
+                transmitDelay: 1
+                ospfInterval:
+                  helloInterval:
+                    deadInterval: 40
+                    helloInterval: 10
+                    neighborDetectionType: ospfdeadintervalmechanism
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospf_interface_created
+          register: ospf_interface_result
+
+        - name: Create or verify OSPFv2 process
+          cisco.fmcansible.fmc_configuration:
+            operation: createOspfPolicyModel
+            data:
+              type: OspfRoute
+              processId: '1'
+              enableProcess: PROCESS_1
+              logAdjacencyChanges:
+                logType: DEFAULT
+              processConfiguration:
+                administrativeDistance:
+                  external: 110
+                  interArea: 110
+                  intraArea: 110
+                ignoreLsaMospf: false
+                rfc1583Compatible: true
+                timers:
+                  lsaGroup: 240
+              areas:
+                - areaId: '0'
+                  areaType:
+                    type: normal
+                  areaNetworks:
+                    - id: "{{ ospf_network.id }}"
+                      name: "{{ ospf_network.name }}"
+                      type: Network
+              neighbors:
+                - ipAddress:
+                    id: "{{ ospf_neighbor.id }}"
+                    name: "{{ ospf_neighbor.name }}"
+                    type: Host
+                  neighborInterface:
+                    id: "{{ fmcansible_routing_interface.id }}"
+                    name: "{{ fmcansible_routing_interface.name }}"
+                    type: PhysicalInterface
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospf_created
+          register: ospf_result
+
+        - name: Read back OSPFv2 process
+          cisco.fmcansible.fmc_configuration:
+            operation: getOspfPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospf_created.id }}"
+            register_as: ospf_readback
+
+        - name: Read back OSPFv2 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getOspfInterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospf_interface_created.id }}"
+            register_as: ospf_interface_readback
+
+        - name: Assert exact OSPFv2 configuration persisted
+          ansible.builtin.assert:
+            that:
+              - ospf_readback.processId == '1'
+              - ospf_readback.enableProcess == 'PROCESS_1'
+              - ospf_readback.processConfiguration.administrativeDistance.external == 110
+              - ospf_readback.processConfiguration.rfc1583Compatible | bool
+              - ospf_readback.areas | length == 1
+              - ospf_readback.areas[0].areaId == '0'
+              - ospf_readback.areas[0].areaNetworks[0].id == ospf_network.id
+              - ospf_readback.neighbors | length == 1
+              - ospf_readback.neighbors[0].ipAddress.id == ospf_neighbor.id
+              - ospf_readback.neighbors[0].neighborInterface.id == fmcansible_routing_interface.id
+              - ospf_interface_readback.deviceInterface.id == fmcansible_routing_interface.id
+              - ospf_interface_readback.ospfProtocolConfiguration.packetCost == 10
+              - ospf_interface_readback.ospfProtocolConfiguration.ptpNonBroadcast | bool
+
+        - name: Deploy OSPFv2 configuration
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} configure OSPFv2"
+          when: >-
+            (ospf_network_result.changed | bool)
+            or (ospf_neighbor_result.changed | bool)
+            or (ospf_result.changed | bool)
+            or (ospf_interface_result.changed | bool)
+
+    - name: Remove and verify OSPFv2 configuration
+      when: routing_phase == 'cleanup'
+      block:
+        - name: Delete OSPFv2 process
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteOspfPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospf_matches[0].id }}"
+          when: ospf_matches | length == 1
+
+        - name: Delete OSPFv2 interface policy
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteOspfInterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+              objectId: "{{ ospf_interface_matches[0].id }}"
+          when: ospf_interface_matches | length == 1
+
+        - name: Delete OSPFv2 area network object
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ ospf_object.id }}"
+          loop: "{{ ospf_network_matches }}"
+          loop_control:
+            loop_var: ospf_object
+            label: "{{ ospf_object.name }}"
+
+        - name: Delete OSPFv2 neighbor host object
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ ospf_object.id }}"
+          loop: "{{ ospf_neighbor_matches }}"
+          loop_control:
+            loop_var: ospf_object
+            label: "{{ ospf_object.name }}"
+
+        - name: Deploy OSPFv2 cleanup
+          ansible.builtin.include_tasks: ../tasks/deploy_routing_device.yml
+          vars:
+            fmcansible_routing_deployment_note: "{{ fmcansible_live_prefix }} remove OSPFv2"
+          when: >-
+            ospf_interface_matches | length == 1
+            or ospf_matches | length == 1
+
+        - name: Read OSPFv2 processes after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfPolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospf_after_cleanup
+
+        - name: Read OSPFv2 interface policies after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllOspfInterfacePolicyModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_routing_device.id }}"
+            register_as: ospf_interface_after_cleanup
+
+        - name: Read network objects after OSPFv2 cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllNetworkObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: ospf_objects_after_cleanup
+
+        - name: Read host objects after OSPFv2 cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllHostObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: ospf_hosts_after_cleanup
+
+        - name: Assert OSPFv2 resources were removed
+          ansible.builtin.assert:
+            that:
+              - "'1' not in (ospf_after_cleanup | map(attribute='processId', default='') | list)"
+              - fmcansible_routing_interface.id not in (ospf_interface_after_cleanup | map(attribute='deviceInterface.id', default='') | list)
+              - ospf_network_name not in (ospf_objects_after_cleanup | map(attribute='name', default='') | list)
+              - ospf_neighbor_name not in (ospf_hosts_after_cleanup | map(attribute='name', default='') | list)

@@ -1,0 +1,189 @@
+---
+- name: Reproduce issue 56 host object idempotency
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars:
+    issue56_prefix: "ci-issue56-{{ lookup('env', 'FMCANSIBLE_RUN_ID') }}"
+    issue56_names:
+      - "{{ issue56_prefix }}-upsert"
+      - "{{ issue56_prefix }}-single-create"
+      - "{{ issue56_prefix }}-bulk-1"
+      - "{{ issue56_prefix }}-bulk-2"
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: issue56_domains
+
+    - name: Store domain UUID
+      ansible.builtin.set_fact:
+        issue56_domain_uuid: "{{ issue56_domains[0].uuid }}"
+
+    - name: Exercise host object idempotency
+      block:
+        - name: Create host object with upsert
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertHostObject
+            data:
+              name: "{{ issue56_names[0] }}"
+              type: Host
+              value: 198.18.56.10
+              description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_upsert_first
+          register: issue56_upsert_first_result
+
+        - name: Repeat identical host object upsert
+          cisco.fmcansible.fmc_configuration:
+            operation: upsertHostObject
+            data:
+              name: "{{ issue56_names[0] }}"
+              type: Host
+              value: 198.18.56.10
+              description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_upsert_second
+          register: issue56_upsert_second_result
+
+        - name: Assert upsert is idempotent
+          ansible.builtin.assert:
+            that:
+              - issue56_upsert_first_result.changed
+              - not issue56_upsert_second_result.changed
+              - issue56_upsert_second.id == issue56_upsert_first.id
+
+        - name: Create one host with createMultipleHostObject
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data:
+              name: "{{ issue56_names[1] }}"
+              type: Host
+              value: 198.18.56.11
+              description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_single_create_first
+          register: issue56_single_create_first_result
+
+        - name: Repeat identical non-bulk createMultipleHostObject
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data:
+              name: "{{ issue56_names[1] }}"
+              type: Host
+              value: 198.18.56.11
+              description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_single_create_second
+          register: issue56_single_create_second_result
+
+        - name: Assert non-bulk create is idempotent
+          ansible.builtin.assert:
+            that:
+              - issue56_single_create_first_result.changed
+              - not issue56_single_create_second_result.changed
+              - issue56_single_create_second.id == issue56_single_create_first.id
+
+        - name: Create two hosts in a bulk request
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data:
+              - name: "{{ issue56_names[2] }}"
+                type: Host
+                value: 198.18.56.12
+                description: FMCAnsible issue 56
+              - name: "{{ issue56_names[3] }}"
+                type: Host
+                value: 198.18.56.13
+                description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            query_params:
+              bulk: true
+            register_as: issue56_bulk_first
+          register: issue56_bulk_first_result
+
+        - name: Repeat identical bulk request
+          cisco.fmcansible.fmc_configuration:
+            operation: createMultipleHostObject
+            data:
+              - name: "{{ issue56_names[2] }}"
+                type: Host
+                value: 198.18.56.12
+                description: FMCAnsible issue 56
+              - name: "{{ issue56_names[3] }}"
+                type: Host
+                value: 198.18.56.13
+                description: FMCAnsible issue 56
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            query_params:
+              bulk: true
+            register_as: issue56_bulk_second
+          register: issue56_bulk_second_result
+          ignore_errors: true
+
+        - name: Report true bulk rerun behavior
+          ansible.builtin.debug:
+            msg:
+              first_changed: "{{ issue56_bulk_first_result.changed }}"
+              second_failed: "{{ issue56_bulk_second_result.failed | default(false) }}"
+              second_changed: "{{ issue56_bulk_second_result.changed | default(false) }}"
+              second_message: "{{ issue56_bulk_second_result.msg | default('') }}"
+
+        - name: Read back all issue 56 hosts
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllHostObject
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_hosts_after_create
+
+        - name: Assert exactly four issue 56 hosts persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                issue56_hosts_after_create
+                | selectattr('name', 'in', issue56_names)
+                | list
+                | length == 4
+      always:
+        - name: Find issue 56 hosts for cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllHostObject
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+            register_as: issue56_hosts_for_cleanup
+
+        - name: Delete issue 56 hosts
+          cisco.fmcansible.fmc_configuration:
+            operation: deleteHostObject
+            path_params:
+              domainUUID: "{{ issue56_domain_uuid }}"
+              objectId: "{{ issue56_host.id }}"
+          loop: >-
+            {{ issue56_hosts_for_cleanup
+               | selectattr('name', 'in', issue56_names)
+               | list }}
+          loop_control:
+            loop_var: issue56_host
+            label: "{{ issue56_host.name }}"
+
+    - name: Verify issue 56 cleanup
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllHostObject
+        path_params:
+          domainUUID: "{{ issue56_domain_uuid }}"
+        register_as: issue56_hosts_after_cleanup
+
+    - name: Assert all issue 56 hosts were removed
+      ansible.builtin.assert:
+        that:
+          - >-
+            issue56_hosts_after_cleanup
+            | selectattr('name', 'in', issue56_names)
+            | list
+            | length == 0

@@ -1,0 +1,28 @@
+---
+- import_playbook: 00_preflight.yml
+
+- import_playbook: 01_cleanup_stale.yml
+
+- import_playbook: 10_objects_single.yml
+
+- import_playbook: 11_objects_bulk.yml
+
+- import_playbook: 20_access_policy.yml
+
+- import_playbook: 21_access_rules_ips_file_malware.yml
+
+- import_playbook: 22_access_policy_advanced_settings.yml
+
+- import_playbook: 30_ravpn_create_delete.yml
+
+- import_playbook: 31_s2s_vpn_create_delete.yml
+
+- import_playbook: 32_s2s_topology_api_support.yml
+
+- import_playbook: 40_routing_api_support.yml
+
+- import_playbook: 41_interface_configuration.yml
+
+- import_playbook: 50_platform_settings.yml
+
+- import_playbook: 99_cleanup.yml

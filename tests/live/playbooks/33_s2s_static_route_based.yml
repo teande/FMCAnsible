@@ -1,0 +1,490 @@
+---
+- name: Validate static route-based S2S with borrowed loopback addresses
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled route-based S2S test
+      ansible.builtin.debug:
+        msg: "Route-based S2S test is disabled."
+      when: not fmcansible_run_vpn_tests | bool
+
+    - name: Run static route-based S2S lifecycle test
+      when: fmcansible_run_vpn_tests | bool
+      block:
+        - name: Validate route-based S2S inputs
+          ansible.builtin.assert:
+            that:
+              - fmcansible_s2s_route_endpoints | length == 2
+              - >-
+                fmcansible_s2s_route_endpoints
+                | map(attribute='device_name')
+                | reject('equalto', '')
+                | list
+                | length == 2
+              - >-
+                fmcansible_s2s_route_endpoints
+                | map(attribute='device_name')
+                | unique
+                | list
+                | length == 2
+              - >-
+                fmcansible_s2s_route_endpoints
+                | map(attribute='loopback_id')
+                | unique
+                | list
+                | length == 2
+              - >-
+                fmcansible_s2s_route_endpoints
+                | map(attribute='tunnel_id')
+                | unique
+                | list
+                | length == 2
+            fail_msg: >-
+              Static route-based S2S testing requires two unique managed
+              devices with unique loopback and tunnel IDs.
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_route_domains
+
+        - name: Initialize route-based S2S facts
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_route_domains[fmcansible_domain_index].uuid }}
+            live_route_resolved_endpoints: []
+            live_route_active_endpoints: []
+            live_route_security_zone: {}
+
+        - name: Get managed devices once
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_devices
+
+        - name: Resolve route-based S2S devices and source interfaces
+          ansible.builtin.include_tasks: ../tasks/resolve_s2s_route_endpoint.yml
+          loop: "{{ fmcansible_s2s_route_endpoints }}"
+          loop_control:
+            loop_var: route_endpoint
+            label: "{{ route_endpoint.device_name }}"
+
+        - name: Get IKEv2 policies
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIkev2PolicyObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_ikev2_policies
+
+        - name: Get IKEv2 IPsec proposals
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIKEv2IPsecProposal
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_ipsec_proposals
+
+        - name: Select route-based S2S cryptographic objects
+          ansible.builtin.set_fact:
+            live_route_ikev2_matches: >-
+              {{ (live_route_ikev2_policies | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_s2s_ikev2_policy_name)
+                 | list }}
+            live_route_ipsec_matches: >-
+              {{ (live_route_ipsec_proposals | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_s2s_ipsec_proposal_name)
+                 | list }}
+
+        - name: Require unique route-based S2S cryptographic objects
+          ansible.builtin.assert:
+            that:
+              - live_route_ikev2_matches | length == 1
+              - live_route_ipsec_matches | length == 1
+
+        - name: Create, deploy, validate, and remove route-based S2S
+          block:
+            - name: Create dedicated VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: createMultipleSecurityZoneObject
+                data:
+                  - name: "{{ fmcansible_s2s_route_zone_name }}"
+                    type: SecurityZone
+                    interfaceMode: ROUTED
+                    interfaces: []
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                query_params:
+                  bulk: true
+                register_as: live_route_security_zones
+
+            - name: Store dedicated VTI security zone
+              ansible.builtin.set_fact:
+                live_route_security_zone: >-
+                  {{ live_route_security_zones[0] }}
+
+            - name: Read dedicated VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: getSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+                register_as: live_route_security_zone_get
+
+            - name: Assert dedicated VTI security zone persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_route_security_zone_get.id
+                    == live_route_security_zone.id
+                  - >-
+                    live_route_security_zone_get.name
+                    == fmcansible_s2s_route_zone_name
+                  - live_route_security_zone_get.type == 'SecurityZone'
+                  - >-
+                    live_route_security_zone_get.interfaceMode == 'ROUTED'
+
+            - name: Create and verify loopback and static VTI per endpoint
+              ansible.builtin.include_tasks: >-
+                ../tasks/create_s2s_route_interfaces.yml
+              loop: "{{ live_route_resolved_endpoints }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+
+            - name: Create static route-based point-to-point topology
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDS2SVpnModel
+                data:
+                  name: "{{ fmcansible_s2s_route_vpn_name }}"
+                  type: FTDS2SVpn
+                  description: "{{ fmcansible_live_prefix }}"
+                  topologyType: POINT_TO_POINT
+                  routeBased: true
+                  ikeV1Enabled: false
+                  ikeV2Enabled: true
+                  enableEcmpAtHub: false
+                  enableEcmpAtSpoke: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_route_vpn
+
+            - name: Read static route-based topology
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDS2SVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_vpn.id }}"
+                register_as: live_route_vpn_get
+
+            - name: Assert static route-based topology persisted
+              ansible.builtin.assert:
+                that:
+                  - live_route_vpn_get.id == live_route_vpn.id
+                  - >-
+                    live_route_vpn_get.name
+                    == fmcansible_s2s_route_vpn_name
+                  - live_route_vpn_get.type == 'FTDS2SVpn'
+                  - live_route_vpn_get.topologyType == 'POINT_TO_POINT'
+                  - live_route_vpn_get.routeBased | bool
+                  - not live_route_vpn_get.ikeV1Enabled | bool
+                  - live_route_vpn_get.ikeV2Enabled | bool
+
+            - name: Get route-based S2S IKE settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnIkeSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                register_as: live_route_ike_settings
+
+            - name: Get route-based S2S IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                register_as: live_route_ipsec_settings
+
+            - name: Require one IKE and one IPsec settings object
+              ansible.builtin.assert:
+                that:
+                  - live_route_ike_settings | length == 1
+                  - live_route_ipsec_settings | length == 1
+
+            - name: Configure route-based S2S IKE settings
+              cisco.fmcansible.fmc_configuration:
+                operation: updateVpnIkeSettings
+                data:
+                  id: "{{ live_route_ike_settings[0].id }}"
+                  type: IkeSettings
+                  ikeV2Settings:
+                    automaticPreSharedKeyLength: 32
+                    enforceHexBasedPreSharedKeyOnly: false
+                    authenticationType: AUTOMATIC_PRE_SHARED_KEY
+                    policies:
+                      - name: "{{ live_route_ikev2_matches[0].name }}"
+                        id: "{{ live_route_ikev2_matches[0].id }}"
+                        type: "{{ live_route_ikev2_matches[0].type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                  objectId: "{{ live_route_ike_settings[0].id }}"
+
+            - name: Configure route-based S2S IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: updateVpnIPSecSettings
+                data:
+                  id: "{{ live_route_ipsec_settings[0].id }}"
+                  type: IPSecSettings
+                  cryptoMapType: STATIC
+                  ikeV2Mode: TUNNEL
+                  enableSaStrengthEnforcement: false
+                  enableRRI: false
+                  lifetimeSeconds: 28800
+                  lifetimeKilobytes: 4608000
+                  perfectForwardSecrecy:
+                    enabled: false
+                  validateIncomingIcmpErrorMessage: false
+                  doNotFragmentPolicy: NONE
+                  tfcPackets:
+                    enabled: false
+                    burstBytes: 0
+                    payloadBytes: 0
+                    timeoutSeconds: 0
+                  ikeV2IpsecProposal:
+                    - name: "{{ live_route_ipsec_matches[0].name }}"
+                      id: "{{ live_route_ipsec_matches[0].id }}"
+                      type: "{{ live_route_ipsec_matches[0].type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                  objectId: "{{ live_route_ipsec_settings[0].id }}"
+
+            - name: Read configured route-based S2S IKE settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnIkeSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                  objectId: "{{ live_route_ike_settings[0].id }}"
+                register_as: live_route_ike_settings_get
+
+            - name: Read configured route-based S2S IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                  objectId: "{{ live_route_ipsec_settings[0].id }}"
+                register_as: live_route_ipsec_settings_get
+
+            - name: Assert route-based IKE and IPsec settings persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_route_ike_settings_get.ikeV2Settings
+                    .authenticationType == 'AUTOMATIC_PRE_SHARED_KEY'
+                  - >-
+                    live_route_ike_settings_get.ikeV2Settings.policies[0].id
+                    == live_route_ikev2_matches[0].id
+                  - live_route_ipsec_settings_get.cryptoMapType == 'STATIC'
+                  - live_route_ipsec_settings_get.ikeV2Mode == 'TUNNEL'
+                  - >-
+                    live_route_ipsec_settings_get.ikeV2IpsecProposal[0].id
+                    == live_route_ipsec_matches[0].id
+
+            - name: Create static route-based S2S endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnEndpoint
+                data:
+                  peerType: PEER
+                  device: "{{ route_endpoint.device }}"
+                  interface:
+                    id: "{{ route_endpoint.vti.id }}"
+                    name: "{{ route_endpoint.vti.ifname }}"
+                    type: VTI
+                  tunnelSourceInterface: >-
+                    {{ route_endpoint.source_interface_nameif }}
+                  sendTunnelInterfaceIpToPeer: true
+                  allowIncomingIKEv2Routes: true
+                  protectedNetworks: {}
+                  connectionType: BIDIRECTIONAL
+                  isLocalTunnelIdEnabled: false
+                  type: EndPoint
+                  overrideRemoteVpnFilter: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+              loop: "{{ live_route_active_endpoints }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+
+            - name: Get static route-based S2S endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnEndpoint
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_route_vpn.id }}"
+                register_as: live_route_endpoint_summaries
+
+            - name: Initialize complete route-based endpoint results
+              ansible.builtin.set_fact:
+                live_s2s_complete_endpoints: []
+
+            - name: Read complete static route-based S2S endpoints
+              ansible.builtin.include_tasks: ../tasks/read_s2s_endpoint.yml
+              vars:
+                live_s2s_container_uuid: "{{ live_route_vpn.id }}"
+              loop: "{{ live_route_endpoint_summaries }}"
+              loop_control:
+                loop_var: live_s2s_endpoint_summary
+                label: "{{ live_s2s_endpoint_summary.name }}"
+
+            - name: Assert every route-based S2S endpoint persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    complete_route_endpoint.device.id
+                    == expected_route_endpoint.device.id
+                  - >-
+                    complete_route_endpoint.interface.id
+                    == expected_route_endpoint.vti.id
+                  - >-
+                    complete_route_endpoint.tunnelSourceInterface.id
+                    == expected_route_endpoint.source_interface.id
+                  - complete_route_endpoint.peerType == 'PEER'
+                  - complete_route_endpoint.connectionType == 'BIDIRECTIONAL'
+                  - complete_route_endpoint.sendTunnelInterfaceIpToPeer | bool
+                  - complete_route_endpoint.allowIncomingIKEv2Routes | bool
+                  - >-
+                    complete_route_endpoint.protectedNetworks
+                    | default({})
+                    | length == 0
+                  - not complete_route_endpoint.isLocalTunnelIdEnabled | bool
+                  - not complete_route_endpoint.overrideRemoteVpnFilter | bool
+              vars:
+                expected_route_endpoint: >-
+                  {{ live_route_active_endpoints
+                     | selectattr('device.id', 'equalto',
+                                  complete_route_endpoint.device.id)
+                     | first }}
+              loop: "{{ live_s2s_complete_endpoints }}"
+              loop_control:
+                loop_var: complete_route_endpoint
+                label: "{{ complete_route_endpoint.device.name }}"
+
+            - name: Assert complete route-based S2S configuration
+              ansible.builtin.assert:
+                that:
+                  - live_route_endpoint_summaries | length == 2
+                  - live_s2s_complete_endpoints | length == 2
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='device.id')
+                    | unique
+                    | list
+                    | length == 2
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='interface.id')
+                    | unique
+                    | list
+                    | length == 2
+
+            - name: Deploy static route-based S2S configuration
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ live_route_active_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Deploy {{ fmcansible_s2s_route_vpn_name }}
+                fmcansible_s2s_deployment_required: true
+              when: fmcansible_s2s_deploy | bool
+          always:
+            - name: Delete route-based S2S topology and endpoints
+              ansible.builtin.include_tasks: ../tasks/cleanup_s2s_named.yml
+              vars:
+                fmcansible_s2s_vpn_name: >-
+                  {{ fmcansible_s2s_route_vpn_name }}
+                fmcansible_s2s_protected_network_names: []
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete route-based S2S VTIs and loopbacks
+              ansible.builtin.include_tasks: >-
+                ../tasks/cleanup_s2s_route_interfaces.yml
+              loop: "{{ live_route_resolved_endpoints }}"
+              loop_control:
+                loop_var: route_endpoint
+                label: "{{ route_endpoint.device.name }}"
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Delete dedicated VTI security zone
+              cisco.fmcansible.fmc_configuration:
+                operation: deleteSecurityZoneObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_route_security_zone.id }}"
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - live_route_security_zone.id is defined
+
+            - name: Deploy static route-based S2S removal
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ live_route_resolved_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Remove {{ fmcansible_s2s_route_vpn_name }}
+                fmcansible_s2s_deployment_required: false
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - fmcansible_s2s_deploy | bool
+
+        - name: Re-read route-based S2S topologies after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDS2SVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            filters:
+              name: "{{ fmcansible_s2s_route_vpn_name }}"
+            register_as: live_route_vpns_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Re-read security zones after route-based S2S cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllSecurityZoneObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_route_zones_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Assert route-based S2S cleanup completed
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_route_vpns_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_route_vpn_name)
+                | list
+                | length == 0
+              - >-
+                (live_route_zones_after_cleanup | default([]))
+                | selectattr('name', 'equalto',
+                             fmcansible_s2s_route_zone_name)
+                | list
+                | length == 0
+          when: fmcansible_cleanup_after_test | bool

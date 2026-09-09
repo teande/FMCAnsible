@@ -1,0 +1,15 @@
+---
+all:
+  vars:
+    ansible_connection: httpapi
+    ansible_network_os: cisco.fmcansible.fmc
+    ansible_httpapi_port: 443
+    ansible_httpapi_use_ssl: true
+    ansible_httpapi_validate_certs: true
+    ansible_command_timeout: 180
+    ansible_httpapi_cdfmc: true
+    ansible_httpapi_token: "{{ lookup('env', 'CDFMC_TOKEN') }}"
+    fmcansible_target: cdfmc
+  hosts:
+    cdfmc:
+      ansible_host: "{{ lookup('env', 'CDFMC_HOST') }}"

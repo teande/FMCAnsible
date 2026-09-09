@@ -1,0 +1,56 @@
+---
+- name: Get certificate enrollments for RAVPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_certificate_name }}"
+    register_as: cleanup_ravpn_certificates
+
+- name: Select exact certificate enrollments for RAVPN cleanup
+  ansible.builtin.set_fact:
+    cleanup_ravpn_certificate_matches: >-
+      {{ (cleanup_ravpn_certificates | default([]))
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', fmcansible_ravpn_certificate_name)
+         | list }}
+
+- name: Remove test trustpoints from the target FTD
+  ansible.builtin.include_tasks: cleanup_ravpn_device_certificate.yml
+  vars:
+    live_ra_certificate: "{{ cleanup_ravpn_certificate }}"
+  loop: "{{ cleanup_ravpn_certificate_matches }}"
+  loop_control:
+    loop_var: cleanup_ravpn_certificate
+    label: "{{ cleanup_ravpn_certificate.name }}"
+  when: fmcansible_ra_target_device is defined
+
+- name: Delete RAVPN certificate enrollments
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      objectId: "{{ cleanup_ravpn_certificate.id }}"
+  loop: "{{ cleanup_ravpn_certificate_matches }}"
+  loop_control:
+    loop_var: cleanup_ravpn_certificate
+    label: "{{ cleanup_ravpn_certificate.name }}"
+
+- name: Re-read certificate enrollments after RAVPN cleanup
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    filters:
+      name: "{{ fmcansible_ravpn_certificate_name }}"
+    register_as: cleanup_ravpn_certificates_after
+
+- name: Assert the RAVPN certificate enrollment was removed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cleanup_ravpn_certificates_after | default([]))
+        | selectattr('name', 'equalto', fmcansible_ravpn_certificate_name)
+        | list
+        | length == 0

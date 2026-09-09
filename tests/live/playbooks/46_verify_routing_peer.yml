@@ -1,0 +1,34 @@
+---
+- name: Verify the deployed FTD formed a routing adjacency
+  hosts: routing_peers
+  gather_facts: false
+  become: true
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_protocol: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PROTOCOL') }}"
+  tasks:
+    - name: Select protocol verification command
+      ansible.builtin.set_fact:
+        routing_verify_command: >-
+          {{ {'bgp': "vtysh -c 'show bgp ipv4 unicast summary json'",
+              'ospfv2': "vtysh -c 'show ip ospf neighbor json'",
+              'ospfv3': "vtysh -c 'show ipv6 ospf6 neighbor json'",
+              'eigrp': "vtysh -c 'show ip eigrp neighbors'"}[routing_protocol] }}
+        routing_verify_marker: >-
+          {{ {'bgp': '"state":"Established"',
+              'ospfv2': '"converged":"Full"',
+              'ospfv3': '"state":"Full"',
+              'eigrp': fmcansible_routing_ftd_ipv4_address}[routing_protocol] }}
+
+    - name: Wait for dynamic routing adjacency
+      ansible.builtin.shell: "{{ routing_verify_command }}"
+      register: routing_peer_adjacency
+      changed_when: false
+      retries: 12
+      delay: 10
+      until: routing_verify_marker in routing_peer_adjacency.stdout
+
+    - name: Report dynamic routing adjacency
+      ansible.builtin.debug:
+        var: routing_peer_adjacency.stdout_lines

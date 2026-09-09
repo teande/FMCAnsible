@@ -1,0 +1,63 @@
+---
+- name: Get FMC domains
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: routing_domains
+
+- name: Store FMC domain
+  ansible.builtin.set_fact:
+    fmcansible_domain_uuid: "{{ routing_domains[fmcansible_domain_index].uuid }}"
+
+- name: Get managed devices once
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDevice
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+    register_as: routing_devices
+
+- name: Select exact routing test device
+  ansible.builtin.set_fact:
+    routing_device_matches: >-
+      {{ routing_devices
+         | selectattr('name', 'equalto', fmcansible_routing_test_device_name)
+         | list }}
+
+- name: Require exactly one routing test device
+  ansible.builtin.assert:
+    that:
+      - routing_device_matches | length == 1
+
+- name: Store routing test device
+  ansible.builtin.set_fact:
+    fmcansible_routing_device: "{{ routing_device_matches[0] }}"
+
+- name: Get physical interfaces once
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ fmcansible_domain_uuid }}"
+      containerUUID: "{{ fmcansible_routing_device.id }}"
+    query_params:
+      expanded: true
+    register_as: routing_interfaces
+
+- name: Select the dynamic routing interface
+  ansible.builtin.set_fact:
+    routing_interface_matches: >-
+      {{ ((routing_interfaces
+           | selectattr('ifname', 'defined')
+           | selectattr('ifname', 'equalto', fmcansible_routing_interface_name)
+           | list)
+          + (routing_interfaces
+             | selectattr('name', 'equalto', fmcansible_routing_interface_name)
+             | list))
+         | unique(attribute='id') | list }}
+
+- name: Require exactly one dynamic routing interface
+  ansible.builtin.assert:
+    that:
+      - routing_interface_matches | length == 1
+
+- name: Store dynamic routing interface
+  ansible.builtin.set_fact:
+    fmcansible_routing_interface: "{{ routing_interface_matches[0] }}"

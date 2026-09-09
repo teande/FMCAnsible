@@ -1,0 +1,537 @@
+---
+fmcansible_run_id: "{{ lookup('env', 'FMCANSIBLE_RUN_ID') }}"
+fmcansible_cleanup_prefix: "ci-fmcansible-"
+fmcansible_live_prefix: "{{ fmcansible_cleanup_prefix }}{{ fmcansible_run_id }}"
+fmcansible_domain_index: 0
+
+fmcansible_run_vpn_tests: false
+fmcansible_run_access_policy_advanced_tests: true
+fmcansible_run_platform_settings_tests: true
+fmcansible_run_s2s_topology_probe_tests: false
+fmcansible_run_routing_api_tests: false
+fmcansible_run_interface_tests: false
+fmcansible_run_deploy_tests: false
+fmcansible_run_token_refresh_tests: false
+fmcansible_cleanup_after_test: true
+fmcansible_enforce_ga_version: false
+fmcansible_allowed_fmc_versions: []
+
+fmcansible_object_single:
+  name: "{{ fmcansible_live_prefix }}-host-1"
+  value: "198.18.10.10"
+
+fmcansible_object_bulk:
+  - name: "{{ fmcansible_live_prefix }}-bulk-host-1"
+    value: "198.18.10.11"
+  - name: "{{ fmcansible_live_prefix }}-bulk-host-2"
+    value: "198.18.10.12"
+
+fmcansible_access_policy_name: "{{ fmcansible_live_prefix }}-acp"
+fmcansible_access_rule_name: "{{ fmcansible_live_prefix }}-rule"
+fmcansible_access_rule_bulk_name: "{{ fmcansible_live_prefix }}-bulk-rule"
+fmcansible_file_policy_name: "{{ fmcansible_live_prefix }}-file-policy"
+fmcansible_access_category_name: >-
+  ci-cat-{{ (fmcansible_run_id | hash('sha1'))[:16] }}
+fmcansible_access_reference_rule_name: >-
+  ci-ref-rule-{{ (fmcansible_run_id | hash('sha1'))[:16] }}
+fmcansible_access_source_network_name: >-
+  {{ fmcansible_live_prefix }}-access-src-net
+fmcansible_access_destination_network_name: >-
+  {{ fmcansible_live_prefix }}-access-dst-net
+fmcansible_access_source_group_name: >-
+  {{ fmcansible_live_prefix }}-access-src-group
+fmcansible_access_destination_group_name: >-
+  {{ fmcansible_live_prefix }}-access-dst-group
+fmcansible_access_source_zone_name: >-
+  {{ fmcansible_live_prefix }}-access-src-zone
+fmcansible_access_destination_zone_name: >-
+  {{ fmcansible_live_prefix }}-access-dst-zone
+fmcansible_access_policy_advanced_name: >-
+  {{ fmcansible_live_prefix }}-advanced-acp
+fmcansible_access_policy_advanced_probes:
+  - key: application_logging
+    operation: getAllAccessPolicyAdvancedLoggingSetting
+    required: true
+    targets: [onprem, cdfmc]
+  - key: eve
+    operation: getAllEVESettingModel
+    required: true
+    targets: [onprem, cdfmc]
+  - key: inheritance
+    operation: getAllAccessPolicyInheritanceSetting
+    required: true
+    targets: [onprem, cdfmc]
+  - key: logging
+    operation: getAllAccessPolicyLoggingSettingModel
+    required: true
+    targets: [onprem, cdfmc]
+  - key: security_intelligence
+    operation: getAllAccessPolicySecurityIntelligencePolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: ai_defense
+    operation: getAllAccessPolicyAIDefenseSettingsModel
+    required: false
+    targets: [cdfmc]
+
+fmcansible_platform_policy_name: >-
+  {{ fmcansible_live_prefix }}-platform
+fmcansible_platform_settings_probes:
+  - key: login_banner
+    operation: getAllLoginBannerSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: dns
+    operation: getAllFTDDNSSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: external_authentication
+    operation: getAllFTDExternalAuthSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: http_access
+    operation: getAllFTDHttpAccessSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: icmp_access
+    operation: getAllIcmpAccessSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: netflow
+    operation: getAllNetFlowPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: ntp
+    operation: getAllNTPSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: snmp
+    operation: getAllSNMPSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: ssh_access
+    operation: getAllFTDSSHAccessSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_basic
+    operation: getAllSyslogBasicLoggingSetup
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_event_lists
+    operation: getAllFTDSyslogEventListPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_destinations
+    operation: getAllSyslogLoggingDestination
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_email
+    operation: getAllSyslogEmailSetup
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_rate_limits
+    operation: getAllFTDSyslogRateLimitSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_servers
+    operation: getAllSyslogServerSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: syslog_settings
+    operation: getAllSyslogSettingsPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: trusted_dns
+    operation: getAllFTDTrustedDnsServersPolicy
+    required: true
+    targets: [onprem, cdfmc]
+  - key: captive_portal_ciphers
+    operation: getCaptivePortalCiphersSetting
+    required: false
+    targets: [onprem]
+  - key: ssh_server
+    operation: getAllFTDSSHSettingsPolicy
+    required: false
+    targets: [onprem]
+  - key: threat_detection
+    operation: getAllThreatDetectionPolicy
+    required: false
+    targets: [onprem]
+
+fmcansible_ravpn_name: "{{ fmcansible_live_prefix }}-ravpn"
+fmcansible_ravpn_certificate_name: "{{ fmcansible_live_prefix }}-ravpn-cert"
+fmcansible_ravpn_certificate_common_name: >-
+  {{ fmcansible_live_prefix }}.example.invalid
+fmcansible_ravpn_pool_name: "{{ fmcansible_live_prefix }}-ravpn-pool"
+fmcansible_ravpn_pool_range: "198.18.110.10-198.18.110.30"
+fmcansible_ravpn_pool_mask: "255.255.255.0"
+fmcansible_ravpn_dap_name: "{{ fmcansible_live_prefix }}-ravpn-dap"
+fmcansible_ravpn_group_policy_name: "{{ fmcansible_live_prefix }}-ravpn-gp"
+fmcansible_ravpn_local_profile_name: >-
+  {{ fmcansible_live_prefix }}-ravpn-local
+fmcansible_ravpn_ad_profile_name: >-
+  {{ fmcansible_live_prefix }}-ravpn-ad
+fmcansible_ravpn_local_group_alias: >-
+  ci-local-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+fmcansible_ravpn_ad_group_alias: >-
+  ci-ad-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+fmcansible_ravpn_ad_ca_name: FMCAnsible-CI-AD-CA
+fmcansible_ravpn_ad_ca_path: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_CA_CERT_PATH') }}
+fmcansible_ravpn_ad_realm_name: >-
+  {{ fmcansible_live_prefix }}-ad-realm
+fmcansible_ravpn_local_realm_name: >-
+  {{ fmcansible_live_prefix }}-local-realm
+fmcansible_ravpn_ad_hostname: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_HOSTNAME')
+     | default('ad.example.invalid', true) }}
+fmcansible_ravpn_ad_port: 636
+fmcansible_ravpn_ad_domain: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_DOMAIN')
+     | default('example.invalid', true) }}
+fmcansible_ravpn_ad_base_dn: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_BASE_DN')
+     | default('DC=example,DC=invalid', true) }}
+fmcansible_ravpn_ad_group_name: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_VPN_GROUP')
+     | default('FMCAnsible-VPN-Users', true) }}
+fmcansible_ravpn_ad_test_user: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_VPN_USERNAME')
+     | default('fmcansible_vpn_test', true) }}
+fmcansible_ravpn_ad_bind_username: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_BIND_USERNAME') }}
+fmcansible_ravpn_ad_bind_password: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_BIND_PASSWORD') }}
+fmcansible_ravpn_local_username: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_LOCAL_USERNAME')
+     | default('fmcansible_vpn_test', true) }}
+fmcansible_ravpn_local_password: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_LOCAL_PASSWORD') }}
+fmcansible_ravpn_access_zone_name: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_ACCESS_ZONE_NAME') }}
+fmcansible_ravpn_anyconnect_package_name: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_ANYCONNECT_PACKAGE_NAME') }}
+fmcansible_ravpn_client_os: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_CLIENT_OS')
+     | default('LINUX', true) }}
+fmcansible_ravpn_ikev2_policy_name: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_IKEV2_POLICY_NAME')
+     | default('AES-GCM-NULL-SHA-LATEST', true) }}
+fmcansible_ravpn_target_device_name: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_TARGET_DEVICE_NAME') }}
+fmcansible_ravpn_required_license: SECURE_CLIENT_VPNOnly
+fmcansible_ravpn_configure_device_license: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_CONFIGURE_DEVICE_LICENSE')
+     | default('false', true) | bool }}
+fmcansible_ravpn_ad_group_dn: >-
+  {{ lookup('env', 'FMCANSIBLE_AD_VPN_GROUP_DN')
+     | default('CN=' ~ fmcansible_ravpn_ad_group_name
+               ~ ',OU=FMCAnsible CI,' ~ fmcansible_ravpn_ad_base_dn,
+               true) }}
+fmcansible_ravpn_deploy: >-
+  {{ lookup('env', 'FMCANSIBLE_RAVPN_DEPLOY')
+     | default('false', true) | bool }}
+
+fmcansible_s2s_vpn_name: "{{ fmcansible_live_prefix }}-s2s"
+fmcansible_s2s_topology_type: >-
+  {{ lookup('env', 'FMCANSIBLE_S2S_TOPOLOGY_TYPE')
+     | default('POINT_TO_POINT', true) }}
+fmcansible_s2s_ikev2_policy_name: >-
+  {{ lookup('env', 'FMCANSIBLE_S2S_IKEV2_POLICY_NAME')
+     | default('AES-GCM-NULL-SHA-LATEST', true) }}
+fmcansible_s2s_ipsec_proposal_name: >-
+  {{ lookup('env', 'FMCANSIBLE_S2S_IPSEC_PROPOSAL_NAME')
+     | default('AES-GCM', true) }}
+fmcansible_s2s_deploy: >-
+  {{ lookup('env', 'FMCANSIBLE_S2S_DEPLOY')
+     | default('false', true) | bool }}
+fmcansible_s2s_route_vpn_name: >-
+  {{ fmcansible_live_prefix }}-route-s2s
+fmcansible_s2s_route_zone_name: >-
+  {{ fmcansible_live_prefix }}-route-zone
+fmcansible_s2s_route_endpoints:
+  - device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_DEVICE_A') }}"
+    source_interface_name: >-
+      {{ lookup('env', 'FMCANSIBLE_S2S_INTERFACE_A')
+         | default('Ethernet0/0', true) }}
+    loopback_id: 90
+    loopback_ifname: >-
+      ci-lo-a-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    loopback_address: 169.254.90.1
+    loopback_netmask: 255.255.255.252
+    tunnel_id: 90
+    tunnel_ifname: >-
+      ci-vti-a-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+  - device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_DEVICE_B') }}"
+    source_interface_name: >-
+      {{ lookup('env', 'FMCANSIBLE_S2S_INTERFACE_B')
+         | default('Ethernet0/0', true) }}
+    loopback_id: 91
+    loopback_ifname: >-
+      ci-lo-b-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    loopback_address: 169.254.90.2
+    loopback_netmask: 255.255.255.252
+    tunnel_id: 91
+    tunnel_ifname: >-
+      ci-vti-b-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+fmcansible_s2s_dvti_vpn_name: >-
+  {{ fmcansible_live_prefix }}-dvti-s2s
+fmcansible_s2s_dvti_zone_name: >-
+  {{ fmcansible_live_prefix }}-dvti-zone
+fmcansible_s2s_dvti_endpoints:
+  - device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_HUB_DEVICE') }}"
+    peer_type: HUB
+    source_interface_name: >-
+      {{ lookup('env', 'FMCANSIBLE_S2S_HUB_INTERFACE')
+         | default('Ethernet0/0', true) }}
+    loopback_id: 92
+    loopback_ifname: >-
+      ci-lo-hub-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    loopback_address: 169.254.92.1
+    loopback_netmask: 255.255.255.255
+    tunnel_id: 92
+    tunnel_ifname: >-
+      ci-dvti-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    tunnel_type: DYNAMIC
+  - device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_SPOKE_DEVICE') }}"
+    peer_type: SPOKE
+    source_interface_name: >-
+      {{ lookup('env', 'FMCANSIBLE_S2S_SPOKE_INTERFACE')
+         | default('Ethernet0/0', true) }}
+    loopback_id: 93
+    loopback_ifname: >-
+      ci-lo-spoke-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    loopback_address: 169.254.92.2
+    loopback_netmask: 255.255.255.255
+    tunnel_id: 93
+    tunnel_ifname: >-
+      ci-svti-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+    tunnel_type: STATIC
+fmcansible_s2s_sdwan_vpn_name: >-
+  {{ fmcansible_live_prefix }}-sdwan-s2s
+fmcansible_s2s_sdwan_zone_name: >-
+  {{ fmcansible_live_prefix }}-sdwan-zone
+fmcansible_s2s_sdwan_pool_name: >-
+  {{ fmcansible_live_prefix }}-sdwan-pool
+fmcansible_s2s_sdwan_pool_range: 169.254.94.10-169.254.94.50
+fmcansible_s2s_sdwan_pool_mask: 255.255.255.0
+fmcansible_s2s_sdwan_hub:
+  device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_HUB_DEVICE') }}"
+  peer_type: HUB
+  source_interface_name: >-
+    {{ lookup('env', 'FMCANSIBLE_S2S_HUB_INTERFACE')
+       | default('Ethernet0/0', true) }}
+  loopback_id: 94
+  loopback_ifname: >-
+    ci-lo-sdwan-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+  loopback_address: 169.254.94.1
+  loopback_netmask: 255.255.255.255
+  tunnel_id: 94
+  tunnel_ifname: >-
+    ci-dvti-sdwan-{{ (fmcansible_run_id | hash('sha1'))[:10] }}
+  tunnel_type: DYNAMIC
+fmcansible_s2s_sdwan_spoke:
+  device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_SPOKE_DEVICE') }}"
+  peer_type: SPOKE
+  source_interface_name: >-
+    {{ lookup('env', 'FMCANSIBLE_S2S_SPOKE_INTERFACE')
+       | default('Ethernet0/0', true) }}
+  loopback_id: 95
+  loopback_ifname: unused
+  loopback_address: 169.254.95.1
+  loopback_netmask: 255.255.255.255
+  tunnel_id: 95
+  tunnel_ifname: unused
+fmcansible_s2s_endpoint_a:
+  device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_DEVICE_A') }}"
+  peer_type: >-
+    {{ 'HUB' if fmcansible_s2s_topology_type == 'HUB_AND_SPOKE'
+       else 'PEER' }}
+  interface_name: >-
+    {{ lookup('env', 'FMCANSIBLE_S2S_INTERFACE_A')
+       | default('Ethernet0/1', true) }}
+  protected_network:
+    name: "{{ fmcansible_live_prefix }}-s2s-network-a"
+    value: "198.18.101.0/24"
+fmcansible_s2s_endpoint_b:
+  device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_DEVICE_B') }}"
+  peer_type: >-
+    {{ 'SPOKE' if fmcansible_s2s_topology_type == 'HUB_AND_SPOKE'
+       else 'PEER' }}
+  interface_name: >-
+    {{ lookup('env', 'FMCANSIBLE_S2S_INTERFACE_B')
+       | default('Ethernet0/1', true) }}
+  protected_network:
+    name: "{{ fmcansible_live_prefix }}-s2s-network-b"
+    value: "198.18.102.0/24"
+fmcansible_s2s_endpoint_c:
+  device_name: "{{ lookup('env', 'FMCANSIBLE_S2S_DEVICE_C') }}"
+  peer_type: >-
+    {{ 'SPOKE' if fmcansible_s2s_topology_type == 'HUB_AND_SPOKE'
+       else 'PEER' }}
+  interface_name: >-
+    {{ lookup('env', 'FMCANSIBLE_S2S_INTERFACE_C')
+       | default('Ethernet0/1', true) }}
+  protected_network:
+    name: "{{ fmcansible_live_prefix }}-s2s-network-c"
+    value: "198.18.103.0/24"
+fmcansible_s2s_endpoints: >-
+  {{ [fmcansible_s2s_endpoint_a, fmcansible_s2s_endpoint_b]
+     + ([fmcansible_s2s_endpoint_c]
+        if fmcansible_s2s_topology_type in ['HUB_AND_SPOKE', 'FULL_MESH']
+        else []) }}
+fmcansible_s2s_topology_probes:
+  - key: policy-p2p
+    topologyType: POINT_TO_POINT
+    routeBased: false
+    allow_rejection: false
+    allowed_rejection_regex: ""
+  - key: policy-hub-spoke
+    topologyType: HUB_AND_SPOKE
+    routeBased: false
+    allow_rejection: false
+    allowed_rejection_regex: ""
+  - key: policy-full-mesh
+    topologyType: FULL_MESH
+    routeBased: false
+    allow_rejection: false
+    allowed_rejection_regex: ""
+  - key: route-p2p
+    topologyType: POINT_TO_POINT
+    routeBased: true
+    allow_rejection: false
+    allowed_rejection_regex: ""
+  - key: route-hub-spoke
+    topologyType: HUB_AND_SPOKE
+    routeBased: true
+    allow_rejection: false
+    allowed_rejection_regex: ""
+  - key: sdwan-auto-vpn
+    topologyType: AUTO_VPN
+    routeBased: true
+    extra_data:
+      autoVpnSettings:
+        routeSettings:
+          enableMultiPath: false
+    allow_rejection: true
+    allowed_rejection_regex: >-
+      license|entitlement|export.control|smart.licens|not.enabled
+  - key: sase-umbrella
+    topologyType: SASE_TUNNEL
+    routeBased: true
+    allow_rejection: true
+    allowed_rejection_regex: >-
+      umbrella|connection|integration|prerequisite|not.configured
+  - key: sase-secure-access
+    topologyType: SSE_TUNNEL
+    routeBased: true
+    allow_rejection: true
+    allowed_rejection_regex: >-
+      secure.access|connection|integration|prerequisite|feature.flag|not.enabled|not.configured
+
+fmcansible_routing_test_device_name: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_TEST_DEVICE') }}
+fmcansible_routing_deploy: "{{ fmcansible_run_deploy_tests }}"
+fmcansible_routing_peer_interface: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_PEER_INTERFACE')
+     | default('eth1', true) }}
+fmcansible_routing_peer_ipv4_address: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_PEER_IPV4')
+     | default('192.0.2.10', true) }}
+fmcansible_routing_ftd_ipv4_address: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_FTD_IPV4')
+     | default('192.0.2.11', true) }}
+fmcansible_routing_transit_network: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_TRANSIT_NETWORK')
+     | default('192.0.2.0/24', true) }}
+fmcansible_routing_peer_ipv6_address: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_PEER_IPV6')
+     | default('2001:db8:71::10', true) }}
+fmcansible_routing_ftd_ipv6_address: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_FTD_IPV6')
+     | default('2001:db8:71::11', true) }}
+fmcansible_routing_ipv6_prefix: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_IPV6_PREFIX')
+     | default('64', true) }}
+fmcansible_routing_egress_interface: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_EGRESS_INTERFACE')
+     | default('outside', true) }}
+fmcansible_routing_ipv4_gateway: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_IPV4_GATEWAY') }}
+fmcansible_routing_ipv6_deploy: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_IPV6_DEPLOY')
+     | default('false', true)
+     | bool }}
+fmcansible_routing_ipv4_network:
+  name: "{{ fmcansible_live_prefix }}-route-v4"
+  value: "198.18.240.0/24"
+fmcansible_routing_ipv6_network:
+  name: "{{ fmcansible_live_prefix }}-route-v6"
+  value: "2001:db8:240::/64"
+fmcansible_routing_initial_metric: 10
+fmcansible_routing_updated_metric: 20
+fmcansible_routing_policy_deploy: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_POLICY_DEPLOY')
+     | default('false', true) | bool }}
+fmcansible_routing_ecmp_interfaces: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_ECMP_INTERFACES')
+     | split(',') | reject('equalto', '') | list }}
+fmcansible_routing_pbr_ingress_interface: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_PBR_INGRESS_INTERFACE') }}
+fmcansible_routing_pbr_egress_interfaces: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_PBR_EGRESS_INTERFACES')
+     | split(',') | reject('equalto', '') | list }}
+fmcansible_routing_ecmp_name: >-
+  {{ fmcansible_live_prefix }}-ecmp
+fmcansible_routing_pbr_acl_name: >-
+  {{ fmcansible_live_prefix }}-pbr-acl
+fmcansible_routing_secondary_hardware_name: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_SECONDARY_HARDWARE')
+     | default('Ethernet0/2', true) }}
+fmcansible_routing_secondary_interface_name: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_SECONDARY_INTERFACE')
+     | default('outside2', true) }}
+fmcansible_routing_secondary_zone_name: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_SECONDARY_ZONE')
+     | default('fmcansible-ci-routing-outside2', true) }}
+fmcansible_routing_secondary_ipv4_address: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_SECONDARY_IPV4')
+     | default('198.51.100.11', true) }}
+fmcansible_routing_secondary_ipv4_prefix: >-
+  {{ lookup('env', 'FMCANSIBLE_ROUTING_SECONDARY_PREFIX')
+     | default('24', true) }}
+
+fmcansible_interface_test_device_name: >-
+  {{ lookup('env', 'FMCANSIBLE_INTERFACE_TEST_DEVICE') }}
+fmcansible_interface_test_name: >-
+  {{ lookup('env', 'FMCANSIBLE_INTERFACE_TEST_NAME') }}
+fmcansible_interface_test_cases:
+  - field: mode
+    value: PASSIVE
+    required: false
+    omit_fields: [ipv6]
+  - field: MTU
+    value: 1400
+    required: true
+  - field: enableSGTPropagate
+    value: true
+    required: false
+  - field: nveOnly
+    value: true
+    required: false
+  - field: priority
+    value: 100
+    required: false
+  - field: pathMonitoring
+    value:
+      enable: true
+      monitoredIp: 192.0.2.1
+      type: PEER_IPV4
+    required: false
+  - field: hardware
+    value:
+      autoNegState: true
+      duplex: AUTO
+      flowControlSend: "OFF"
+      speed: AUTO
+    required: false

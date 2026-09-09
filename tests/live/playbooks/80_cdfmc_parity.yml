@@ -1,0 +1,25 @@
+---
+- name: Validate cdFMC live-test parity
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../vars/feature_matrix.yml
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Require cdFMC target
+      ansible.builtin.assert:
+        that:
+          - fmcansible_target == 'cdfmc'
+        fail_msg: "This playbook is only for fmcansible_target=cdfmc."
+
+    - name: Get cdFMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Assert cdFMC returned domains
+      ansible.builtin.assert:
+        that:
+          - live_domains is defined
+          - live_domains | length > 0

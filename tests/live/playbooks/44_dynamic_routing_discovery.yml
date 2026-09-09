@@ -1,0 +1,120 @@
+---
+- name: Discover current cdFMC dynamic routing configuration
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get cdFMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: routing_domains
+
+    - name: Store cdFMC domain
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: "{{ routing_domains[fmcansible_domain_index].uuid }}"
+
+    - name: Get managed devices
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        register_as: routing_devices
+
+    - name: Select routing test device
+      ansible.builtin.set_fact:
+        routing_device_matches: >-
+          {{ routing_devices
+             | selectattr('name', 'equalto', fmcansible_routing_test_device_name)
+             | list }}
+
+    - name: Require one routing test device
+      ansible.builtin.assert:
+        that:
+          - routing_device_matches | length == 1
+
+    - name: Store routing test device
+      ansible.builtin.set_fact:
+        fmcansible_routing_device: "{{ routing_device_matches[0] }}"
+
+    - name: Read BGP general settings
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllBGPGeneralSettingModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_bgp_general
+
+    - name: Read BGP address families
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllBGPIPvAddressFamilyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_bgp
+
+    - name: Read OSPFv2 processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_ospfv2
+
+    - name: Read OSPFv2 interface settings
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfInterfacePolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_ospfv2_interfaces
+
+    - name: Read OSPFv3 processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfv3PolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_ospfv3
+
+    - name: Read OSPFv3 interface settings
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllOspfv3InterfacePolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_ospfv3_interfaces
+
+    - name: Read EIGRP processes
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllEigrpPolicyModel
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_routing_device.id }}"
+        query_params:
+          expanded: true
+        register_as: routing_eigrp
+
+    - name: Report current dynamic routing state
+      ansible.builtin.debug:
+        msg:
+          bgp_general: "{{ routing_bgp_general }}"
+          bgp: "{{ routing_bgp }}"
+          ospfv2: "{{ routing_ospfv2 }}"
+          ospfv2_interfaces: "{{ routing_ospfv2_interfaces }}"
+          ospfv3: "{{ routing_ospfv3 }}"
+          ospfv3_interfaces: "{{ routing_ospfv3_interfaces }}"
+          eigrp: "{{ routing_eigrp }}"

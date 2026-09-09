@@ -1,0 +1,116 @@
+---
+- name: Configure the dedicated dynamic routing peer
+  hosts: routing_peers
+  gather_facts: false
+  become: true
+  vars_files:
+    - ../group_vars/all.example.yml
+  vars:
+    routing_protocol: "{{ lookup('env', 'FMCANSIBLE_ROUTING_PROTOCOL') | default('none', true) }}"
+  tasks:
+    - name: Validate requested routing protocol
+      ansible.builtin.assert:
+        that:
+          - routing_protocol in ['none', 'bgp', 'ospfv2', 'ospfv3', 'eigrp']
+
+    - name: Read peer interface addresses
+      ansible.builtin.command: >-
+        ip -o address show dev {{ fmcansible_routing_peer_interface }}
+      register: routing_peer_addresses
+      changed_when: false
+
+    - name: Add the peer IPv4 address
+      ansible.builtin.command: >-
+        ip address add {{ fmcansible_routing_peer_ipv4_address }}/24
+        dev {{ fmcansible_routing_peer_interface }}
+      when: >-
+        fmcansible_routing_peer_ipv4_address
+        not in routing_peer_addresses.stdout
+      changed_when: true
+
+    - name: Add the OSPFv3 peer global address
+      ansible.builtin.command: >-
+        ip -6 address add
+        {{ fmcansible_routing_peer_ipv6_address }}/{{ fmcansible_routing_ipv6_prefix }}
+        dev {{ fmcansible_routing_peer_interface }}
+      when:
+        - routing_protocol == 'ospfv3'
+        - >-
+          (fmcansible_routing_peer_ipv6_address ~ '/'
+           ~ fmcansible_routing_ipv6_prefix)
+          not in routing_peer_addresses.stdout
+      changed_when: true
+
+    - name: Remove the obsolete secondary OSPFv3 link-local address
+      ansible.builtin.command: >-
+        ip -6 address del fe80::10/64
+        dev {{ fmcansible_routing_peer_interface }}
+      when: "'fe80::10/64' in routing_peer_addresses.stdout"
+      changed_when: true
+
+    - name: Install protocol-specific FRR configuration
+      ansible.builtin.copy:
+        dest: /etc/frr/frr.conf
+        owner: frr
+        group: frr
+        mode: '0640'
+        content: |
+          frr defaults traditional
+          hostname {{ inventory_hostname | replace('_', '-') }}
+          service integrated-vtysh-config
+          log syslog informational
+          {% if routing_protocol == 'bgp' %}
+          router bgp 65002
+           bgp router-id {{ fmcansible_routing_peer_ipv4_address }}
+           no bgp ebgp-requires-policy
+           neighbor {{ fmcansible_routing_ftd_ipv4_address }} remote-as 65001
+           address-family ipv4 unicast
+            redistribute connected
+           exit-address-family
+          {% elif routing_protocol == 'ospfv2' %}
+          interface {{ fmcansible_routing_peer_interface }}
+           ip ospf area 0.0.0.0
+           ip ospf network point-to-point
+          exit
+          router ospf
+           ospf router-id {{ fmcansible_routing_peer_ipv4_address }}
+           network {{ fmcansible_routing_transit_network }} area 0.0.0.0
+          exit
+          {% elif routing_protocol == 'ospfv3' %}
+          interface {{ fmcansible_routing_peer_interface }}
+           ipv6 ospf6 area 0.0.0.0
+          exit
+          router ospf6
+           ospf6 router-id {{ fmcansible_routing_peer_ipv4_address }}
+          exit
+          {% elif routing_protocol == 'eigrp' %}
+          router eigrp 100
+           network {{ fmcansible_routing_transit_network }}
+          exit
+          {% endif %}
+      register: routing_peer_frr_config
+
+    - name: Clear the FRR systemd start-rate limit
+      ansible.builtin.command: systemctl reset-failed frr
+      when: routing_peer_frr_config.changed
+      changed_when: false
+
+    - name: Restart FRR after protocol change
+      ansible.builtin.systemd_service:
+        name: frr
+        enabled: true
+        state: restarted
+      when: routing_peer_frr_config.changed
+
+    - name: Read active FRR configuration
+      ansible.builtin.command: vtysh -c 'show running-config'
+      register: routing_peer_running_config
+      changed_when: false
+
+    - name: Verify selected protocol is active in FRR
+      ansible.builtin.assert:
+        that:
+          - >-
+            routing_protocol == 'none'
+            or ('router ' ~ ('ospf6' if routing_protocol == 'ospfv3' else routing_protocol | replace('ospfv2', 'ospf')))
+               in routing_peer_running_config.stdout

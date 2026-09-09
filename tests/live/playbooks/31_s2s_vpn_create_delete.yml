@@ -1,0 +1,592 @@
+---
+- name: Validate site-to-site VPN create and delete
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../vars/feature_matrix.yml
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Skip disabled S2S VPN test
+      ansible.builtin.debug:
+        msg: "Site-to-site VPN test is disabled."
+      when: not fmcansible_run_vpn_tests | bool
+
+    - name: Run S2S VPN create, verify, and delete test
+      when: fmcansible_run_vpn_tests | bool
+      block:
+        - name: Require S2S VPN API support
+          ansible.builtin.assert:
+            that:
+              - >-
+                fmcansible_platform_matrix[
+                  fmcansible_target
+                ].policy_s2s_create_delete | bool
+            fail_msg: >-
+              S2S VPN create/delete is not available for
+              fmcansible_target={{ fmcansible_target }}.
+
+        - name: Validate S2S topology inputs
+          ansible.builtin.assert:
+            that:
+              - >-
+                fmcansible_s2s_topology_type
+                in ['POINT_TO_POINT', 'HUB_AND_SPOKE', 'FULL_MESH']
+              - >-
+                (fmcansible_s2s_topology_type == 'POINT_TO_POINT'
+                 and fmcansible_s2s_endpoints | length == 2)
+                or
+                (fmcansible_s2s_topology_type
+                 in ['HUB_AND_SPOKE', 'FULL_MESH']
+                 and fmcansible_s2s_endpoints | length >= 3)
+              - >-
+                fmcansible_s2s_endpoints
+                | map(attribute='device_name')
+                | reject('equalto', '')
+                | list
+                | length == fmcansible_s2s_endpoints | length
+              - >-
+                fmcansible_s2s_endpoints
+                | map(attribute='device_name')
+                | unique
+                | list
+                | length == fmcansible_s2s_endpoints | length
+              - >-
+                fmcansible_s2s_endpoints
+                | map(attribute='interface_name')
+                | reject('equalto', '')
+                | list
+                | length == fmcansible_s2s_endpoints | length
+              - >-
+                fmcansible_s2s_endpoints
+                | map(attribute='protected_network')
+                | map(attribute='name')
+                | unique
+                | list
+                | length == fmcansible_s2s_endpoints | length
+              - >-
+                fmcansible_s2s_topology_type != 'HUB_AND_SPOKE'
+                or
+                (fmcansible_s2s_endpoints
+                 | selectattr('peer_type', 'equalto', 'HUB')
+                 | list
+                 | length == 1)
+              - >-
+                fmcansible_s2s_topology_type != 'HUB_AND_SPOKE'
+                or
+                (fmcansible_s2s_endpoints
+                 | selectattr('peer_type', 'equalto', 'SPOKE')
+                 | list
+                 | length >= 2)
+              - >-
+                fmcansible_s2s_topology_type != 'HUB_AND_SPOKE'
+                or
+                (fmcansible_s2s_endpoints
+                 | map(attribute='peer_type')
+                 | difference(['HUB', 'SPOKE'])
+                 | length == 0)
+              - >-
+                fmcansible_s2s_topology_type == 'HUB_AND_SPOKE'
+                or
+                (fmcansible_s2s_endpoints
+                 | rejectattr('peer_type', 'equalto', 'PEER')
+                 | list
+                 | length == 0)
+            fail_msg: >-
+              Policy S2S testing requires two PEER endpoints for point-to-point,
+              at least three PEER endpoints for full mesh, or exactly one HUB
+              and at least two SPOKE endpoints for hub-and-spoke. Every endpoint
+              needs a unique protected network.
+
+        - name: Get FMC domains
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDomain
+            register_as: live_s2s_domains
+
+        - name: Store S2S test domain UUID
+          ansible.builtin.set_fact:
+            fmcansible_domain_uuid: >-
+              {{ live_s2s_domains[fmcansible_domain_index].uuid }}
+            fmcansible_s2s_resolved_endpoints: []
+            fmcansible_s2s_protected_network_names: >-
+              {{ fmcansible_s2s_endpoints
+                 | map(attribute='protected_network')
+                 | map(attribute='name')
+                 | list }}
+
+        - name: Get managed devices for S2S VPN
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllDevice
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_s2s_devices
+
+        - name: Resolve S2S endpoint devices and interfaces
+          ansible.builtin.include_tasks: ../tasks/resolve_s2s_endpoint.yml
+          loop: "{{ fmcansible_s2s_endpoints }}"
+          loop_control:
+            loop_var: fmcansible_s2s_endpoint
+            label: "{{ fmcansible_s2s_endpoint.device_name }}"
+
+        - name: Get IKEv2 policies for S2S VPN
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIkev2PolicyObject
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_s2s_ikev2_policies
+
+        - name: Get IKEv2 IPsec proposals for S2S VPN
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllIKEv2IPsecProposal
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_s2s_ipsec_proposals
+
+        - name: Select exact S2S cryptographic objects
+          ansible.builtin.set_fact:
+            fmcansible_s2s_ikev2_matches: >-
+              {{ (live_s2s_ikev2_policies | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_s2s_ikev2_policy_name)
+                 | list }}
+            fmcansible_s2s_ipsec_matches: >-
+              {{ (live_s2s_ipsec_proposals | default([]))
+                 | selectattr('name', 'defined')
+                 | selectattr('name', 'equalto',
+                              fmcansible_s2s_ipsec_proposal_name)
+                 | list }}
+
+        - name: Require unique S2S cryptographic objects
+          ansible.builtin.assert:
+            that:
+              - fmcansible_s2s_ikev2_matches | length == 1
+              - fmcansible_s2s_ipsec_matches | length == 1
+            fail_msg: >-
+              Expected one IKEv2 policy named
+              {{ fmcansible_s2s_ikev2_policy_name }} and one IKEv2 IPsec
+              proposal named {{ fmcansible_s2s_ipsec_proposal_name }}.
+
+        - name: Create, validate, and clean up S2S VPN resources
+          block:
+            - name: Build S2S protected-network bulk payload
+              ansible.builtin.set_fact:
+                fmcansible_s2s_network_payload: >-
+                  {{
+                    (fmcansible_s2s_network_payload | default([]))
+                    + [
+                        {
+                          'name': s2s_endpoint.protected_network.name,
+                          'value': s2s_endpoint.protected_network.value,
+                          'type': 'Network',
+                          'description': fmcansible_live_prefix
+                        }
+                      ]
+                  }}
+              loop: "{{ fmcansible_s2s_resolved_endpoints }}"
+              loop_control:
+                loop_var: s2s_endpoint
+                label: "{{ s2s_endpoint.protected_network.name }}"
+
+            - name: Create protected network objects in one bulk request
+              cisco.fmcansible.fmc_configuration:
+                operation: createMultipleNetworkObject
+                data: "{{ fmcansible_s2s_network_payload }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                query_params:
+                  bulk: true
+                register_as: live_s2s_networks
+
+            - name: Store created S2S protected network objects
+              ansible.builtin.set_fact:
+                fmcansible_created_s2s_networks: "{{ live_s2s_networks }}"
+
+            - name: Read back every S2S protected network object
+              cisco.fmcansible.fmc_configuration:
+                operation: getNetworkObject
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ created_s2s_network.id }}"
+                register_as: live_s2s_network_get
+              loop: "{{ fmcansible_created_s2s_networks }}"
+              loop_control:
+                loop_var: created_s2s_network
+                label: "{{ created_s2s_network.name }}"
+              register: live_s2s_network_read_results
+
+            - name: Assert every S2S protected network object persisted
+              ansible.builtin.assert:
+                that:
+                  - s2s_network_get.id == s2s_network_result.created_s2s_network.id
+                  - s2s_network_get.name == expected_s2s_network.name
+                  - s2s_network_get.type == 'Network'
+                  - s2s_network_get.value == expected_s2s_network.value
+                  - s2s_network_get.description == fmcansible_live_prefix
+              vars:
+                s2s_network_get: >-
+                  {{ s2s_network_result.ansible_facts.live_s2s_network_get }}
+                expected_s2s_network: >-
+                  {{ fmcansible_s2s_endpoints
+                     | map(attribute='protected_network')
+                     | selectattr('name', 'equalto', s2s_network_get.name)
+                     | first }}
+              loop: "{{ live_s2s_network_read_results.results }}"
+              loop_control:
+                loop_var: s2s_network_result
+                label: "{{ s2s_network_result.created_s2s_network.name }}"
+
+            - name: Create policy-based S2S VPN topology
+              cisco.fmcansible.fmc_configuration:
+                operation: createFTDS2SVpnModel
+                data:
+                  name: "{{ fmcansible_s2s_vpn_name }}"
+                  type: FTDS2SVpn
+                  description: "{{ fmcansible_live_prefix }}"
+                  topologyType: "{{ fmcansible_s2s_topology_type }}"
+                  routeBased: false
+                  ikeV1Enabled: false
+                  ikeV2Enabled: true
+                  enableEcmpAtHub: false
+                  enableEcmpAtSpoke: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                register_as: live_s2s_vpn
+
+            - name: Read back created S2S VPN topology
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDS2SVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_s2s_vpn.id }}"
+                register_as: live_s2s_vpn_shell_get
+
+            - name: Assert S2S VPN topology persisted
+              ansible.builtin.assert:
+                that:
+                  - live_s2s_vpn_shell_get.id == live_s2s_vpn.id
+                  - live_s2s_vpn_shell_get.name == fmcansible_s2s_vpn_name
+                  - live_s2s_vpn_shell_get.type == 'FTDS2SVpn'
+                  - >-
+                    live_s2s_vpn_shell_get.description
+                    == fmcansible_live_prefix
+                  - >-
+                    live_s2s_vpn_shell_get.topologyType
+                    == fmcansible_s2s_topology_type
+                  - not live_s2s_vpn_shell_get.routeBased | bool
+                  - not live_s2s_vpn_shell_get.ikeV1Enabled | bool
+                  - live_s2s_vpn_shell_get.ikeV2Enabled | bool
+                  - not live_s2s_vpn_shell_get.enableEcmpAtHub | bool
+                  - not live_s2s_vpn_shell_get.enableEcmpAtSpoke | bool
+
+            - name: Get S2S IKE settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnIkeSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                register_as: live_s2s_ike_settings
+
+            - name: Get S2S IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                register_as: live_s2s_ipsec_settings
+
+            - name: Require one IKE and one IPsec settings object
+              ansible.builtin.assert:
+                that:
+                  - live_s2s_ike_settings | length == 1
+                  - live_s2s_ipsec_settings | length == 1
+
+            - name: Configure S2S automatic pre-shared key and IKEv2 policy
+              cisco.fmcansible.fmc_configuration:
+                operation: updateVpnIkeSettings
+                data:
+                  id: "{{ live_s2s_ike_settings[0].id }}"
+                  type: IkeSettings
+                  ikeV2Settings:
+                    automaticPreSharedKeyLength: 32
+                    enforceHexBasedPreSharedKeyOnly: false
+                    authenticationType: AUTOMATIC_PRE_SHARED_KEY
+                    policies:
+                      - name: "{{ fmcansible_s2s_ikev2_matches[0].name }}"
+                        id: "{{ fmcansible_s2s_ikev2_matches[0].id }}"
+                        type: "{{ fmcansible_s2s_ikev2_matches[0].type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                  objectId: "{{ live_s2s_ike_settings[0].id }}"
+                register_as: live_s2s_updated_ike_settings
+
+            - name: Configure S2S IKEv2 IPsec proposal
+              cisco.fmcansible.fmc_configuration:
+                operation: updateVpnIPSecSettings
+                data:
+                  id: "{{ live_s2s_ipsec_settings[0].id }}"
+                  type: IPSecSettings
+                  cryptoMapType: STATIC
+                  ikeV2Mode: TUNNEL
+                  enableSaStrengthEnforcement: false
+                  enableRRI: false
+                  lifetimeSeconds: 28800
+                  lifetimeKilobytes: 4608000
+                  perfectForwardSecrecy:
+                    enabled: false
+                  validateIncomingIcmpErrorMessage: false
+                  doNotFragmentPolicy: NONE
+                  tfcPackets:
+                    enabled: false
+                    burstBytes: 0
+                    payloadBytes: 0
+                    timeoutSeconds: 0
+                  ikeV2IpsecProposal:
+                    - name: "{{ fmcansible_s2s_ipsec_matches[0].name }}"
+                      id: "{{ fmcansible_s2s_ipsec_matches[0].id }}"
+                      type: "{{ fmcansible_s2s_ipsec_matches[0].type }}"
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                  objectId: "{{ live_s2s_ipsec_settings[0].id }}"
+                register_as: live_s2s_updated_ipsec_settings
+
+            - name: Read back updated S2S IKE settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnIkeSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                  objectId: "{{ live_s2s_ike_settings[0].id }}"
+                register_as: live_s2s_ike_settings_get
+
+            - name: Read back updated S2S IPsec settings
+              cisco.fmcansible.fmc_configuration:
+                operation: getVpnIPSecSettings
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                  objectId: "{{ live_s2s_ipsec_settings[0].id }}"
+                register_as: live_s2s_ipsec_settings_get
+
+            - name: Assert S2S IKE and IPsec settings persisted
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    live_s2s_ike_settings_get.id
+                    == live_s2s_ike_settings[0].id
+                  - >-
+                    live_s2s_ike_settings_get.ikeV2Settings
+                    .authenticationType == 'AUTOMATIC_PRE_SHARED_KEY'
+                  - >-
+                    live_s2s_ike_settings_get.ikeV2Settings
+                    .automaticPreSharedKeyLength == 32
+                  - >-
+                    live_s2s_ike_settings_get.ikeV2Settings.policies[0].id
+                    == fmcansible_s2s_ikev2_matches[0].id
+                  - >-
+                    live_s2s_ipsec_settings_get.id
+                    == live_s2s_ipsec_settings[0].id
+                  - live_s2s_ipsec_settings_get.cryptoMapType == 'STATIC'
+                  - live_s2s_ipsec_settings_get.ikeV2Mode == 'TUNNEL'
+                  - live_s2s_ipsec_settings_get.lifetimeSeconds == 28800
+                  - live_s2s_ipsec_settings_get.lifetimeKilobytes == 4608000
+                  - >-
+                    live_s2s_ipsec_settings_get.ikeV2IpsecProposal[0].id
+                    == fmcansible_s2s_ipsec_matches[0].id
+
+            - name: Create managed S2S VPN endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: createVpnEndpoint
+                data:
+                  peerType: "{{ s2s_endpoint.peer_type }}"
+                  device: "{{ s2s_endpoint.device }}"
+                  interface: "{{ s2s_endpoint.interface }}"
+                  protectedNetworks:
+                    networks:
+                      - name: "{{ s2s_endpoint_network.name }}"
+                        id: "{{ s2s_endpoint_network.id }}"
+                        type: "{{ s2s_endpoint_network.type }}"
+                  connectionType: BIDIRECTIONAL
+                  isLocalTunnelIdEnabled: false
+                  type: EndPoint
+                  overrideRemoteVpnFilter: false
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+              vars:
+                s2s_endpoint_network: >-
+                  {{ fmcansible_created_s2s_networks
+                     | selectattr('name', 'equalto',
+                                  s2s_endpoint.protected_network.name)
+                     | first }}
+              loop: "{{ fmcansible_s2s_resolved_endpoints }}"
+              loop_control:
+                loop_var: s2s_endpoint
+                label: "{{ s2s_endpoint.device.name }}"
+              register: live_s2s_endpoint_create_results
+
+            - name: Read created S2S VPN
+              cisco.fmcansible.fmc_configuration:
+                operation: getFTDS2SVpnModel
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  objectId: "{{ live_s2s_vpn.id }}"
+                register_as: live_s2s_vpn_after_create
+
+            - name: Read created S2S VPN endpoints
+              cisco.fmcansible.fmc_configuration:
+                operation: getAllVpnEndpoint
+                path_params:
+                  domainUUID: "{{ fmcansible_domain_uuid }}"
+                  containerUUID: "{{ live_s2s_vpn.id }}"
+                register_as: live_s2s_endpoints_after_create
+
+            - name: Initialize complete S2S endpoint results
+              ansible.builtin.set_fact:
+                live_s2s_complete_endpoints: []
+
+            - name: Read complete created S2S VPN endpoints
+              ansible.builtin.include_tasks: ../tasks/read_s2s_endpoint.yml
+              vars:
+                live_s2s_container_uuid: "{{ live_s2s_vpn.id }}"
+              loop: "{{ live_s2s_endpoints_after_create }}"
+              loop_control:
+                loop_var: live_s2s_endpoint_summary
+                label: "{{ live_s2s_endpoint_summary.name }}"
+
+            - name: Assert every S2S endpoint persisted
+              ansible.builtin.assert:
+                that:
+                  - complete_s2s_endpoint.device.id == expected_s2s_endpoint.device.id
+                  - >-
+                    complete_s2s_endpoint.interface.id
+                    == expected_s2s_endpoint.interface.id
+                  - >-
+                    complete_s2s_endpoint.peerType
+                    == expected_s2s_endpoint.peer_type
+                  - complete_s2s_endpoint.connectionType == 'BIDIRECTIONAL'
+                  - >-
+                    complete_s2s_endpoint.protectedNetworks.networks
+                    | length == 1
+                  - >-
+                    complete_s2s_endpoint.protectedNetworks.networks[0].id
+                    == expected_s2s_network.id
+                  - not complete_s2s_endpoint.isLocalTunnelIdEnabled | bool
+                  - not complete_s2s_endpoint.overrideRemoteVpnFilter | bool
+              vars:
+                expected_s2s_endpoint: >-
+                  {{ fmcansible_s2s_resolved_endpoints
+                     | selectattr('device.id', 'equalto',
+                                  complete_s2s_endpoint.device.id)
+                     | first }}
+                expected_s2s_network: >-
+                  {{ fmcansible_created_s2s_networks
+                     | selectattr('name', 'equalto',
+                                  expected_s2s_endpoint.protected_network.name)
+                     | first }}
+              loop: "{{ live_s2s_complete_endpoints }}"
+              loop_control:
+                loop_var: complete_s2s_endpoint
+                label: "{{ complete_s2s_endpoint.device.name }}"
+
+            - name: Assert complete S2S VPN configuration
+              ansible.builtin.assert:
+                that:
+                  - live_s2s_vpn_after_create.name == fmcansible_s2s_vpn_name
+                  - live_s2s_vpn_after_create.type == 'FTDS2SVpn'
+                  - >-
+                    live_s2s_vpn_after_create.description
+                    == fmcansible_live_prefix
+                  - >-
+                    live_s2s_vpn_after_create.topologyType
+                    == fmcansible_s2s_topology_type
+                  - not live_s2s_vpn_after_create.routeBased | bool
+                  - live_s2s_vpn_after_create.ikeV2Enabled | bool
+                  - not live_s2s_vpn_after_create.ikeV1Enabled | bool
+                  - not live_s2s_vpn_after_create.enableEcmpAtHub | bool
+                  - not live_s2s_vpn_after_create.enableEcmpAtSpoke | bool
+                  - >-
+                    live_s2s_endpoints_after_create | length
+                    == fmcansible_s2s_endpoints | length
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='device')
+                    | map(attribute='id')
+                    | unique
+                    | list
+                    | length == fmcansible_s2s_endpoints | length
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='interface')
+                    | map(attribute='id')
+                    | unique
+                    | list
+                    | length == fmcansible_s2s_endpoints | length
+                  - >-
+                    live_s2s_complete_endpoints
+                    | map(attribute='protectedNetworks')
+                    | map(attribute='networks')
+                    | flatten
+                    | map(attribute='id')
+                    | unique
+                    | list
+                    | length == fmcansible_s2s_endpoints | length
+                  - >-
+                    live_s2s_ike_settings_get.ikeV2Settings.authenticationType
+                    == 'AUTOMATIC_PRE_SHARED_KEY'
+                  - >-
+                    live_s2s_ipsec_settings_get.ikeV2IpsecProposal | length == 1
+
+            - name: Deploy created S2S VPN configuration
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ fmcansible_s2s_resolved_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Deploy {{ fmcansible_s2s_vpn_name }}
+                fmcansible_s2s_deployment_required: true
+              when: fmcansible_s2s_deploy | bool
+          always:
+            - name: Clean up this run's S2S VPN resources
+              ansible.builtin.include_tasks: ../tasks/cleanup_s2s_named.yml
+              when: fmcansible_cleanup_after_test | bool
+
+            - name: Deploy S2S VPN removal
+              ansible.builtin.include_tasks: ../tasks/deploy_s2s_endpoints.yml
+              vars:
+                fmcansible_s2s_deployment_device_ids: >-
+                  {{ fmcansible_s2s_resolved_endpoints
+                     | map(attribute='device.id')
+                     | unique
+                     | list }}
+                fmcansible_s2s_deployment_note: >-
+                  Remove {{ fmcansible_s2s_vpn_name }}
+                fmcansible_s2s_deployment_required: false
+              when:
+                - fmcansible_cleanup_after_test | bool
+                - fmcansible_s2s_deploy | bool
+
+        - name: Re-read S2S VPNs after cleanup
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllFTDS2SVpnModel
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            filters:
+              name: "{{ fmcansible_s2s_vpn_name }}"
+            register_as: live_s2s_vpns_after_cleanup
+          when: fmcansible_cleanup_after_test | bool
+
+        - name: Assert S2S VPN cleanup
+          ansible.builtin.assert:
+            that:
+              - >-
+                (live_s2s_vpns_after_cleanup | default([]))
+                | selectattr('name', 'equalto', fmcansible_s2s_vpn_name)
+                | list
+                | length == 0
+          when: fmcansible_cleanup_after_test | bool

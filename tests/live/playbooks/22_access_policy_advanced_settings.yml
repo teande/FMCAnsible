@@ -1,0 +1,264 @@
+---
+- name: Validate Access Control Policy advanced settings
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: live_domains
+
+    - name: Initialize advanced-settings test state
+      ansible.builtin.set_fact:
+        fmcansible_domain_uuid: >-
+          {{ live_domains[fmcansible_domain_index].uuid }}
+        fmcansible_created_access_policy: {}
+        fmcansible_access_policy_advanced_report: {}
+        fmcansible_application_logging_capabilities: >-
+          {{
+            {
+              'collection_operation':
+                'getAllAccessPolicyAdvancedLoggingSetting',
+              'oas3_operation':
+                'getAllAccessPolicyApplicationLoggingSettingModel',
+              'platform_syslog_destination': fmcansible_target == 'onprem'
+            }
+          }}
+
+    - name: Create, validate, and clean up advanced settings
+      when: fmcansible_run_access_policy_advanced_tests | bool
+      block:
+        - name: Create temporary access policy
+          cisco.fmcansible.fmc_configuration:
+            operation: createAccessPolicy
+            data:
+              type: AccessPolicy
+              name: "{{ fmcansible_access_policy_advanced_name }}"
+              defaultAction:
+                action: BLOCK
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+            register_as: live_advanced_access_policy
+
+        - name: Track temporary access policy
+          ansible.builtin.set_fact:
+            fmcansible_created_access_policy: >-
+              {{ live_advanced_access_policy }}
+
+        - name: Read back advanced-settings access policy
+          cisco.fmcansible.fmc_configuration:
+            operation: getAccessPolicy
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              objectId: "{{ fmcansible_created_access_policy.id }}"
+            register_as: live_advanced_access_policy_get
+
+        - name: Assert advanced-settings access policy persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_advanced_access_policy_get.id
+                == fmcansible_created_access_policy.id
+              - >-
+                live_advanced_access_policy_get.name
+                == fmcansible_access_policy_advanced_name
+              - live_advanced_access_policy_get.type == 'AccessPolicy'
+              - >-
+                live_advanced_access_policy_get.defaultAction.action == 'BLOCK'
+
+        - name: Probe declared Access Control Policy setting families
+          ansible.builtin.include_tasks: ../tasks/probe_operation.yml
+          loop: "{{ fmcansible_access_policy_advanced_probes }}"
+          loop_control:
+            loop_var: fmcansible_probe
+            label: "{{ fmcansible_probe.key }}"
+          vars:
+            fmcansible_probe_path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_access_policy.id }}"
+            fmcansible_probe_report_fact: >-
+              fmcansible_access_policy_advanced_report
+          when: fmcansible_target in fmcansible_probe.targets
+
+        - name: Find required advanced-setting probe failures
+          ansible.builtin.set_fact:
+            fmcansible_required_advanced_setting_failures: >-
+              {{
+                fmcansible_access_policy_advanced_report
+                | dict2items
+                | selectattr('value.required', 'equalto', true)
+                | rejectattr('value.status', 'equalto', 'accepted')
+                | map(attribute='key')
+                | list
+              }}
+
+        - name: Assert required advanced-setting APIs are accepted
+          ansible.builtin.assert:
+            that:
+              - fmcansible_required_advanced_setting_failures | length == 0
+            fail_msg: >-
+              Required Access Control Policy advanced-setting APIs failed:
+              {{ fmcansible_required_advanced_setting_failures }}.
+              Report={{ fmcansible_access_policy_advanced_report }}
+
+        - name: Get application logging setting
+          cisco.fmcansible.fmc_configuration:
+            operation: getAllAccessPolicyAdvancedLoggingSetting
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_access_policy.id }}"
+            register_as: live_application_logging_settings
+
+        - name: Assert application logging setting exists
+          ansible.builtin.assert:
+            that:
+              - live_application_logging_settings | length == 1
+
+        - name: Select alternate application log format
+          ansible.builtin.set_fact:
+            fmcansible_application_log_format: >-
+              {{
+                'CSV'
+                if (
+                  live_application_logging_settings[0].logOption
+                  | default('JSON')
+                ) != 'CSV'
+                else 'JSON'
+              }}
+
+        - name: Update application logging format
+          cisco.fmcansible.fmc_configuration:
+            operation: updateAccessPolicyAdvancedLoggingSetting
+            data: >-
+              {{
+                {
+                  'id': live_application_logging_settings[0].id,
+                  'type': (
+                    live_application_logging_settings[0].type
+                    | default('AdvancedLoggingSetting')
+                  ),
+                  'enabled': (
+                    live_application_logging_settings[0].enabled
+                    | default(false)
+                    | bool
+                  ),
+                  'logOption': fmcansible_application_log_format,
+                  'useOverrideDestination': false,
+                  'sendToSplunk': false
+                }
+                | combine(
+                    {
+                      'sendToSysLogConfigFromPlatformSetting': false
+                    }
+                    if (
+                      fmcansible_application_logging_capabilities
+                      .platform_syslog_destination
+                      | bool
+                    )
+                    else {}
+                  )
+              }}
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_access_policy.id }}"
+              objectId: "{{ live_application_logging_settings[0].id }}"
+            register_as: live_application_logging_update
+
+        - name: Read back application logging setting
+          cisco.fmcansible.fmc_configuration:
+            operation: getAccessPolicyAdvancedLoggingSetting
+            path_params:
+              domainUUID: "{{ fmcansible_domain_uuid }}"
+              containerUUID: "{{ fmcansible_created_access_policy.id }}"
+              objectId: "{{ live_application_logging_settings[0].id }}"
+            register_as: live_application_logging_get
+
+        - name: Assert application logging update persisted
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_application_logging_get.logOption
+                == fmcansible_application_log_format
+              - not live_application_logging_get.useOverrideDestination | bool
+              - not live_application_logging_get.sendToSplunk | bool
+
+        - name: Record FMC platform-syslog destination read-back
+          ansible.builtin.set_fact:
+            fmcansible_platform_syslog_destination_readback:
+              requested: false
+              field_returned: >-
+                {{
+                  live_application_logging_get
+                  .sendToSysLogConfigFromPlatformSetting is defined
+                }}
+              effective_value: >-
+                {{
+                  live_application_logging_get
+                  .sendToSysLogConfigFromPlatformSetting
+                  | default(false)
+                  | bool
+                }}
+          when: >-
+            fmcansible_application_logging_capabilities
+            .platform_syslog_destination | bool
+
+        - name: Assert FMC platform-syslog destination is disabled
+          ansible.builtin.assert:
+            that:
+              - >-
+                not live_application_logging_get
+                .sendToSysLogConfigFromPlatformSetting
+                | default(false)
+                | bool
+          when: >-
+            fmcansible_application_logging_capabilities
+            .platform_syslog_destination | bool
+
+        - name: Assert cdFMC omits unsupported platform-syslog setting
+          ansible.builtin.assert:
+            that:
+              - >-
+                live_application_logging_get
+                .sendToSysLogConfigFromPlatformSetting is not defined
+          when: >-
+            not (
+              fmcansible_application_logging_capabilities
+              .platform_syslog_destination | bool
+            )
+
+        - name: Report Access Control Policy advanced-setting capabilities
+          ansible.builtin.debug:
+            var: fmcansible_access_policy_advanced_report
+      always:
+        - name: Delete temporary access policy and settings
+          ansible.builtin.include_tasks: ../tasks/cleanup_access_policy.yml
+          vars:
+            stale_access_policy: "{{ fmcansible_created_access_policy }}"
+          when:
+            - fmcansible_cleanup_after_test | bool
+            - fmcansible_created_access_policy.id is defined
+
+    - name: Verify advanced-settings test policy was removed
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllAccessPolicy
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+        filters:
+          name: "{{ fmcansible_access_policy_advanced_name }}"
+        register_as: live_advanced_access_policy_after_cleanup
+      when:
+        - fmcansible_run_access_policy_advanced_tests | bool
+        - fmcansible_cleanup_after_test | bool
+
+    - name: Assert advanced-settings cleanup
+      ansible.builtin.assert:
+        that:
+          - >-
+            (live_advanced_access_policy_after_cleanup | default([]))
+            | length == 0
+      when:
+        - fmcansible_run_access_policy_advanced_tests | bool
+        - fmcansible_cleanup_after_test | bool

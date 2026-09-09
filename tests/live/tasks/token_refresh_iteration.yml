@@ -1,0 +1,10 @@
+---
+- name: Call getAllDomain during refresh window
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: live_domains
+
+- name: Wait before next refresh-window call
+  ansible.builtin.pause:
+    seconds: 60
+  when: refresh_iteration | int < 39

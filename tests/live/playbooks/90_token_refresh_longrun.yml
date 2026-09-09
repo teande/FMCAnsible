@@ -1,0 +1,22 @@
+---
+- name: Validate long-running token refresh behavior
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.example.yml
+  tasks:
+    - name: Require explicit token refresh test enablement
+      ansible.builtin.assert:
+        that:
+          - fmcansible_run_token_refresh_tests | bool
+        fail_msg: >-
+          Set fmcansible_run_token_refresh_tests=true to run the long-running
+          token refresh test.
+
+    - name: Exercise repeated API calls across the token window
+      ansible.builtin.include_tasks: ../tasks/token_refresh_iteration.yml
+      loop: "{{ range(0, 40) | list }}"
+      loop_control:
+        loop_var: refresh_iteration
+        label: "refresh-window-{{ refresh_iteration }}"

@@ -1,0 +1,156 @@
+---
+- name: Initialize interface field test result
+  ansible.builtin.set_fact:
+    fmcansible_interface_field_result:
+      field: "{{ fmcansible_interface_test_case.field }}"
+      required: "{{ fmcansible_interface_test_case.required | bool }}"
+      status: skipped
+      detail: original-field-not-returned
+
+- name: Test and restore interface field
+  when:
+    - fmcansible_interface_test_case.field in fmcansible_interface_original
+  block:
+    - name: Update interface field
+      cisco.fmcansible.fmc_configuration:
+        operation: updateFTDPhysicalInterface
+        data: >-
+          {{ (fmcansible_interface_writable_baseline
+             | dict2items
+             | rejectattr(
+                 'key',
+                 'in',
+                 fmcansible_interface_test_case.omit_fields | default([])
+               )
+             | items2dict)
+             | combine({
+               fmcansible_interface_test_case.field:
+                 fmcansible_interface_test_case.value
+             }) }}
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+      register: fmcansible_interface_update_result
+      failed_when: false
+
+    - name: Classify interface field update
+      ansible.builtin.set_fact:
+        fmcansible_interface_field_result:
+          field: "{{ fmcansible_interface_test_case.field }}"
+          required: "{{ fmcansible_interface_test_case.required | bool }}"
+          status: >-
+            {{ 'api_rejected'
+               if fmcansible_interface_update_result.msg is defined
+               else 'api_accepted' }}
+          detail: >-
+            {{ fmcansible_interface_update_result.msg
+               | default('API accepted update') }}
+
+    - name: Read interface after field update
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+        register_as: live_interface_after_field_update
+      when: fmcansible_interface_field_result.status == 'api_accepted'
+
+    - name: Classify interface field persistence
+      ansible.builtin.set_fact:
+        fmcansible_interface_field_result:
+          field: "{{ fmcansible_interface_test_case.field }}"
+          required: "{{ fmcansible_interface_test_case.required | bool }}"
+          status: >-
+            {{ 'persisted'
+               if live_interface_after_field_update[
+                    fmcansible_interface_test_case.field
+                  ] == fmcansible_interface_test_case.value
+               else 'accepted_not_persisted' }}
+          detail: >-
+            {{ {
+                 'requested': fmcansible_interface_test_case.value,
+                 'returned': live_interface_after_field_update[
+                   fmcansible_interface_test_case.field
+                 ]
+               } }}
+      when: fmcansible_interface_field_result.status == 'api_accepted'
+  always:
+    - name: Restore named interface baseline after field test
+      cisco.fmcansible.fmc_configuration:
+        operation: updateFTDPhysicalInterface
+        data: "{{ fmcansible_interface_writable_baseline }}"
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+      when:
+        - fmcansible_interface_update_result is defined
+
+    - name: Read interface after baseline restore
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+        register_as: live_interface_after_baseline_restore
+      when:
+        - fmcansible_interface_update_result is defined
+
+    - name: Assert interface field returned to baseline
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_interface_after_baseline_restore[
+              fmcansible_interface_test_case.field
+            ] == fmcansible_interface_writable_baseline[
+              fmcansible_interface_test_case.field
+            ]
+      when:
+        - fmcansible_interface_update_result is defined
+        - >-
+          fmcansible_interface_test_case.field
+          in fmcansible_interface_writable_baseline
+
+    - name: Restore original interface after field test
+      cisco.fmcansible.fmc_configuration:
+        operation: updateFTDPhysicalInterface
+        data: "{{ fmcansible_interface_writable_original }}"
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+      when:
+        - fmcansible_interface_update_result is defined
+
+    - name: Read interface after original restore
+      cisco.fmcansible.fmc_configuration:
+        operation: getFTDPhysicalInterface
+        path_params:
+          domainUUID: "{{ fmcansible_domain_uuid }}"
+          containerUUID: "{{ fmcansible_interface_device.id }}"
+          objectId: "{{ fmcansible_interface_original.id }}"
+        register_as: live_interface_after_original_restore
+      when:
+        - fmcansible_interface_update_result is defined
+
+    - name: Assert interface field returned to original value
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_interface_after_original_restore[
+              fmcansible_interface_test_case.field
+            ] == fmcansible_interface_original[
+              fmcansible_interface_test_case.field
+            ]
+      when:
+        - fmcansible_interface_update_result is defined
+        - fmcansible_interface_test_case.field in fmcansible_interface_original
+
+- name: Record interface field result
+  ansible.builtin.set_fact:
+    fmcansible_interface_test_results: >-
+      {{ fmcansible_interface_test_results
+         + [fmcansible_interface_field_result] }}
