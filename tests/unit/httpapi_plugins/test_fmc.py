@@ -107,6 +107,18 @@ class TestFmcHttpApi(unittest.TestCase):
             timeout=180
         )
 
+    @patch('ansible_collections.cisco.fmcansible.plugins.httpapi.fmc.InternalHttpClient')
+    def test_internal_client_initialization_error_is_not_silenced(self, client_mock):
+        plugin = HttpApi(self.connection_mock)
+        plugin.get_option = mock.Mock(return_value=False)
+        self.connection_mock.get_option.side_effect = KeyError('persistent_command_timeout')
+
+        with self.assertRaises(KeyError):
+            getattr(plugin, 'http_client')
+
+        assert plugin._use_internal_client is True
+        client_mock.assert_not_called()
+
     def test_login_should_request_tokens_when_no_refresh_token(self):
         self.connection_mock.send.return_value = self._login_response(
             {'access_token': 'ACCESS_TOKEN', 'refresh_token': 'REFRESH_TOKEN'}
