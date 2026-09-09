@@ -1,5 +1,5 @@
 pipeline {
-  agent any
+  agent { label 'fmcansible-cicd' }
 
   options {
     timestamps()
@@ -10,12 +10,14 @@ pipeline {
   parameters {
     booleanParam(name: 'USE_DOCKER', defaultValue: true, description: 'Run ansible-test sanity/units with --docker')
     string(name: 'PYTHON_BIN', defaultValue: 'python3', description: 'Python interpreter used for dependency matrix virtualenvs')
+    string(name: 'ANSIBLE_TEST_CORE_VERSION', defaultValue: '2.21.3', description: 'ansible-core version used to run sanity, units, and collection build')
     string(name: 'ANSIBLE_CORE_MATRIX', defaultValue: '2.17.14 2.18.18 2.19.11 2.20.7 2.21.2', description: 'Space-separated ansible-core versions for dependency matrix')
   }
 
   environment {
     ANSIBLE_LOCAL_TEMP = '/tmp/ansible-local'
     ANSIBLE_REMOTE_TEMP = '/tmp/ansible-remote'
+    CI_VENV = "${WORKSPACE}@tmp/fmcansible-ci-venv"
   }
 
   stages {
@@ -23,10 +25,16 @@ pipeline {
       steps {
         sh '''
           set -eux
-          python3 --version
-          ansible --version || true
-          ansible-test --version || true
-          docker version || true
+          python3 -m venv "${CI_VENV}"
+          . "${CI_VENV}/bin/activate"
+          python -m pip install --disable-pip-version-check --upgrade pip
+          python -m pip install --disable-pip-version-check "ansible-core==${ANSIBLE_TEST_CORE_VERSION:-2.21.3}"
+          python --version
+          ansible --version
+          ansible-test --version
+          if [ "${USE_DOCKER:-true}" = "true" ]; then
+            docker version
+          fi
         '''
       }
     }
@@ -35,8 +43,9 @@ pipeline {
       steps {
         sh '''
           set -eux
+          . "${CI_VENV}/bin/activate"
           test_flag=""
-          if [ "${USE_DOCKER}" = "true" ]; then test_flag="--docker"; fi
+          if [ "${USE_DOCKER:-true}" = "true" ]; then test_flag="--docker"; fi
           scripts/ansible-test-local.sh sanity ${test_flag} --color -v
         '''
       }
@@ -46,8 +55,9 @@ pipeline {
       steps {
         sh '''
           set -eux
+          . "${CI_VENV}/bin/activate"
           test_flag=""
-          if [ "${USE_DOCKER}" = "true" ]; then test_flag="--docker"; fi
+          if [ "${USE_DOCKER:-true}" = "true" ]; then test_flag="--docker"; fi
           scripts/ansible-test-local.sh units ${test_flag} --requirements --color -v
         '''
       }
@@ -57,6 +67,7 @@ pipeline {
       steps {
         sh '''
           set -eux
+          . "${CI_VENV}/bin/activate"
           rm -rf dist
           mkdir -p dist
           ANSIBLE_LOCAL_TEMP="${ANSIBLE_LOCAL_TEMP}" ANSIBLE_REMOTE_TEMP="${ANSIBLE_REMOTE_TEMP}" \
@@ -74,9 +85,19 @@ pipeline {
       steps {
         sh '''
           set -eux
-          PYTHON_BIN="${PYTHON_BIN}" ANSIBLE_CORE_MATRIX="${ANSIBLE_CORE_MATRIX}" scripts/dependency-matrix.sh
+          . "${CI_VENV}/bin/activate"
+          USE_DOCKER="${USE_DOCKER:-true}" \
+            PYTHON_BIN="${PYTHON_BIN:-python3}" \
+            ANSIBLE_CORE_MATRIX="${ANSIBLE_CORE_MATRIX:-2.17.14 2.18.18 2.19.11 2.20.7 2.21.2}" \
+            scripts/dependency-matrix.sh
         '''
       }
+    }
+  }
+
+  post {
+    always {
+      sh 'rm -rf "${CI_VENV}"'
     }
   }
 }

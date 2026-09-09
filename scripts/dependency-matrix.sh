@@ -4,9 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MATRIX="${ANSIBLE_CORE_MATRIX:-2.16.19 2.17.14 2.18.18 2.19.11 2.20.7 2.21.2}"
+USE_DOCKER="${USE_DOCKER:-false}"
 WORK_ROOT="${DEPENDENCY_MATRIX_WORK_ROOT:-$(mktemp -d /tmp/fmcansible-deps.XXXXXX)}"
-DIST_DIR="${WORK_ROOT}/dist"
-COLLECTIONS_PATH="${WORK_ROOT}/collections"
 
 cleanup() {
   if [[ "${KEEP_DEPENDENCY_MATRIX_WORKDIR:-0}" != "1" ]]; then
@@ -19,35 +18,84 @@ trap cleanup EXIT
 
 export ANSIBLE_LOCAL_TEMP="${ANSIBLE_LOCAL_TEMP:-/tmp/ansible-local}"
 export ANSIBLE_REMOTE_TEMP="${ANSIBLE_REMOTE_TEMP:-/tmp/ansible-remote}"
-export ANSIBLE_COLLECTIONS_PATH="${COLLECTIONS_PATH}"
-export ANSIBLE_COLLECTIONS_PATHS="${COLLECTIONS_PATH}"
-mkdir -p "${ANSIBLE_LOCAL_TEMP}" "${ANSIBLE_REMOTE_TEMP}" "${DIST_DIR}" "${COLLECTIONS_PATH}"
+mkdir -p "${ANSIBLE_LOCAL_TEMP}" "${ANSIBLE_REMOTE_TEMP}"
 
-echo "Python under test:"
-"${PYTHON_BIN}" --version
+python_for_core() {
+  case "$1" in
+    2.16.*|2.17.*) echo "3.12" ;;
+    2.18.*|2.19.*) echo "3.13" ;;
+    2.20.*|2.21.*) echo "3.14" ;;
+    *) echo "Unsupported ansible-core version: $1" >&2; return 1 ;;
+  esac
+}
 
-for version in ${MATRIX}; do
-  venv="${WORK_ROOT}/venv-${version}"
+test_in_docker() {
+  version="$1"
+  python_version="$(python_for_core "${version}")"
+  version_root="${WORK_ROOT}/core-${version}"
+  mkdir -p "${version_root}"
+
   echo
-  echo "==> Testing ansible-core ${version}"
+  echo "==> Testing ansible-core ${version} with Python ${python_version}"
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --env HOME=/tmp \
+    --env CORE_VERSION="${version}" \
+    --volume "${ROOT_DIR}:/src:ro" \
+    --volume "${version_root}:/work" \
+    "python:${python_version}" \
+    /bin/sh -c '
+      set -eu
+      python -m venv /tmp/venv
+      . /tmp/venv/bin/activate
+      python -m pip install --disable-pip-version-check --upgrade pip
+      python -m pip install --disable-pip-version-check "ansible-core==${CORE_VERSION}"
+      printf "ansible-core==%s\n" "${CORE_VERSION}" > /tmp/constraints.txt
+      python -m pip install --disable-pip-version-check \
+        --requirement /src/requirements.txt --constraint /tmp/constraints.txt
+      mkdir -p /work/dist /work/collections
+      ansible-galaxy collection build /src --output-path /work/dist
+      ANSIBLE_COLLECTIONS_PATH=/work/collections \
+        ansible-galaxy collection install /work/dist/*.tar.gz --force
+      ANSIBLE_COLLECTIONS_PATH=/work/collections \
+        ansible-galaxy collection install cisco.nxos --force
+      ansible --version
+      ANSIBLE_COLLECTIONS_PATH=/work/collections ansible-galaxy collection list
+    '
+}
+
+test_locally() {
+  version="$1"
+  venv="${WORK_ROOT}/venv-${version}"
+  dist_dir="${WORK_ROOT}/dist-${version}"
+  collections_path="${WORK_ROOT}/collections-${version}"
+
+  echo
+  echo "==> Testing ansible-core ${version} with ${PYTHON_BIN}"
   "${PYTHON_BIN}" -m venv "${venv}"
   # shellcheck disable=SC1091
   source "${venv}/bin/activate"
-  python -m pip install --upgrade pip wheel
+  python -m pip install --disable-pip-version-check --upgrade pip
+  python -m pip install --disable-pip-version-check "ansible-core==${version}"
   constraint_file="${WORK_ROOT}/constraints-${version}.txt"
   printf 'ansible-core==%s\n' "${version}" > "${constraint_file}"
-  python -m pip install "ansible-core==${version}"
-  python -m pip install -r "${ROOT_DIR}/requirements.txt" -c "${constraint_file}"
-
-  rm -f "${DIST_DIR}"/*.tar.gz
-  ansible-galaxy collection build "${ROOT_DIR}" --output-path "${DIST_DIR}"
-  ansible-galaxy collection install "${DIST_DIR}"/*.tar.gz --force
-  ansible-galaxy collection install cisco.nxos --force
-
+  python -m pip install --disable-pip-version-check \
+    --requirement "${ROOT_DIR}/requirements.txt" --constraint "${constraint_file}"
+  mkdir -p "${dist_dir}" "${collections_path}"
+  ansible-galaxy collection build "${ROOT_DIR}" --output-path "${dist_dir}"
+  ANSIBLE_COLLECTIONS_PATH="${collections_path}" \
+    ansible-galaxy collection install "${dist_dir}"/*.tar.gz --force
+  ANSIBLE_COLLECTIONS_PATH="${collections_path}" \
+    ansible-galaxy collection install cisco.nxos --force
   ansible --version
-  ansible-galaxy collection list cisco.fmcansible
-  ansible-galaxy collection list cisco.nxos
-  ansible-galaxy collection list ansible.netcommon
-  ansible-galaxy collection list ansible.utils
+  ANSIBLE_COLLECTIONS_PATH="${collections_path}" ansible-galaxy collection list
   deactivate
+}
+
+for version in ${MATRIX}; do
+  if [[ "${USE_DOCKER}" == "true" ]]; then
+    test_in_docker "${version}"
+  else
+    test_locally "${version}"
+  fi
 done
