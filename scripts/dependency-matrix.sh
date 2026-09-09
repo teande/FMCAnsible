@@ -40,6 +40,8 @@ test_in_docker() {
   docker run --rm \
     --user "$(id -u):$(id -g)" \
     --env HOME=/tmp \
+    --env USER=jenkins \
+    --env LOGNAME=jenkins \
     --env CORE_VERSION="${version}" \
     --volume "${ROOT_DIR}:/src:ro" \
     --volume "${version_root}:/work" \
