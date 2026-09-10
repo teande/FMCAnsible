@@ -23,6 +23,15 @@
       domainUUID: "{{ fmcansible_domain_uuid }}"
       containerUUID: "{{ stale_s2s_vpn.id }}"
       objectId: "{{ stale_s2s_endpoint.id }}"
+  register: cleanup_s2s_endpoint_delete
+  retries: 3
+  delay: 15
+  until: >-
+    cleanup_s2s_endpoint_delete is succeeded or
+    'Status code: 404' in (cleanup_s2s_endpoint_delete.msg | default(''))
+  failed_when: >-
+    cleanup_s2s_endpoint_delete is failed and
+    'Status code: 404' not in (cleanup_s2s_endpoint_delete.msg | default(''))
   loop: "{{ cleanup_s2s_ordered_endpoints | default([]) }}"
   loop_control:
     loop_var: stale_s2s_endpoint
