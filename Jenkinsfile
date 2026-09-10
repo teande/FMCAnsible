@@ -179,7 +179,6 @@ pipeline {
               [
                 '/FMCAnsible/Live/On-Prem/Setup/fmcansible-onprem-baseline-sync',
                 '/FMCAnsible/Live/On-Prem/Core/fmcansible-onprem-core-live',
-                '/FMCAnsible/Live/On-Prem/RAVPN/fmcansible-onprem-ravpn-live',
                 '/FMCAnsible/Live/On-Prem/Routing/fmcansible-onprem-routing-lab-setup',
                 '/FMCAnsible/Live/On-Prem/Routing/fmcansible-onprem-routing-static-live',
                 '/FMCAnsible/Live/On-Prem/Routing/fmcansible-onprem-routing-ecmp-pbr',
