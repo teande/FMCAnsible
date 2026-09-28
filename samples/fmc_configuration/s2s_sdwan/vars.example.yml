@@ -2,7 +2,7 @@
 s2s_vpn:
   mode: sdwan
   name: example-sdwan
-  state: present
+  state: inspect
   deploy: false
   domain_uuid: ""
   spoke_pool:

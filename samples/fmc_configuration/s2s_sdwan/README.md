@@ -39,23 +39,40 @@ added separately.
 
 ## Run
 
-Provide a private inventory with `ansible_network_os=cisco.fmcansible.fmc`,
-`ansible_httpapi_cdfmc=true`, HTTPS certificate validation, and a tenant API
-token from a secret store. Supply a private variables file based on
-[`vars.example.yml`](vars.example.yml). Do not put tokens in either file under
-source control.
+[`site.yml`](site.yml) is the playbook. Its `roles` entry invokes
+`cisco.fmcansible.s2s_vpn`; the `s2s_vpn` mapping in
+[`vars.example.yml`](vars.example.yml) supplies its inputs. The inventory
+connects to cdFMC, not to either FTD directly.
+
+From the collection checkout, set `FMCANSIBLE_CDFMC_URL` and
+`FMCANSIBLE_CDFMC_TOKEN` in your shell from a secret store, then make a
+private copy of `vars.example.yml` with your device/interface names and
+addresses outside the repository, for example `/tmp/private-sdwan.yml`. Build
+and install this branch into an isolated collection path so
+Ansible does not load the published 1.1.1 package, which lacks the role. The
+local artifact still reports version 1.1.1 because this branch is unreleased;
+do not publish it. Do not commit the token or private variables file. The
+example inventory enables HTTPS certificate validation.
 
 ```sh
-ansible-playbook -i inventory.example.yml discover.yml
-ansible-playbook -i inventory.example.yml site.yml -e @private-sdwan.yml
+ansible-galaxy collection build . --output-path /tmp/fmcansible-role-build
+ansible-galaxy collection install \
+  /tmp/fmcansible-role-build/cisco-fmcansible-1.1.1.tar.gz \
+  -p /tmp/fmcansible-role-collections --force
+export ANSIBLE_COLLECTIONS_PATH=/tmp/fmcansible-role-collections:$HOME/.ansible/collections
+ansible-playbook -i samples/fmc_configuration/s2s_sdwan/inventory.example.yml \
+  samples/fmc_configuration/s2s_sdwan/discover.yml
+ansible-playbook -i samples/fmc_configuration/s2s_sdwan/inventory.example.yml \
+  samples/fmc_configuration/s2s_sdwan/site.yml -e @/tmp/private-sdwan.yml
 ```
 
 `inventory.example.yml` reads `FMCANSIBLE_CDFMC_URL` and
 `FMCANSIBLE_CDFMC_TOKEN` from the process environment. `discover.yml` lists
 managed devices and physical interface names without changing FMC.
-Set `s2s_vpn.state: inspect` to run prerequisite and ownership checks
-without changing FMC. If `deploy: true`, inspection also checks for
-pre-existing pending changes on the selected devices.
+The sample variables default to `s2s_vpn.state: inspect`, which checks
+prerequisites and ownership without changing FMC. If `deploy: true`, inspection
+also checks for pre-existing pending changes on the selected devices. Change
+the state to `present` only when ready to create the VPN.
 
 Set `s2s_vpn.state: absent` in the variables file to remove the topology and
 the resources owned by this example. The example checks ownership using its

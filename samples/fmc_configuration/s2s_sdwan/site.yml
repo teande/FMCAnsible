@@ -4,4 +4,4 @@
   connection: httpapi
   gather_facts: false
   roles:
-    - cisco.fmcansible.s2s_vpn
+    - role: cisco.fmcansible.s2s_vpn
