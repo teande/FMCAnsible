@@ -1,0 +1,7 @@
+---
+- name: Configure one SD-WAN site-to-site VPN
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  roles:
+    - cisco.fmcansible.s2s_vpn

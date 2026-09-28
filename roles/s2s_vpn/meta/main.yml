@@ -1,0 +1,23 @@
+---
+galaxy_info:
+  role_name: s2s_vpn
+  author: Cisco Systems
+  description: Configure and verify one site-to-site VPN in Cisco FMC
+  company: Cisco Systems, Inc.
+  license: GPL-3.0-or-later
+  min_ansible_version: 2.16.0
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+    - name: GenericUNIX
+      versions:
+        - all
+  galaxy_tags:
+    - cisco
+    - firepower
+    - fmc
+    - security
+    - networking
+    - vpn
+dependencies: []

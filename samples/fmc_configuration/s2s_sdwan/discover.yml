@@ -1,0 +1,62 @@
+---
+- name: Discover cdFMC devices for SD-WAN VPN
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  tasks:
+    - name: Get FMC domains
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDomain
+        register_as: sdwan_discovery_domains
+
+    - name: Require one domain for this discovery example
+      ansible.builtin.assert:
+        that:
+          - sdwan_discovery_domains | length == 1
+        fail_msg: >-
+          This discovery example requires one domain. Select a domain UUID
+          explicitly before configuring the SD-WAN VPN.
+
+    - name: Get managed devices
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllDevice
+        path_params:
+          domainUUID: "{{ sdwan_discovery_domains[0].uuid }}"
+        register_as: sdwan_discovery_devices
+
+    - name: Display managed device names and versions
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.name }} version={{ item.version | default('unknown') }}
+          id={{ item.id }}
+      loop: "{{ sdwan_discovery_devices | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Get physical interfaces on each managed device
+      cisco.fmcansible.fmc_configuration:
+        operation: getAllFTDPhysicalInterface
+        query_params:
+          expanded: true
+        path_params:
+          domainUUID: "{{ sdwan_discovery_domains[0].uuid }}"
+          containerUUID: "{{ item.id }}"
+        register_as: sdwan_discovery_interface_items
+      register: sdwan_discovery_interfaces
+      loop: "{{ sdwan_discovery_devices | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Display configured interface names for each managed device
+      ansible.builtin.debug:
+        msg:
+          device: "{{ item.item.name }}"
+          physical_names: >-
+            {{ item.ansible_facts.sdwan_discovery_interface_items
+               | map(attribute='name') | list }}
+          configured_names: >-
+            {{ item.ansible_facts.sdwan_discovery_interface_items
+               | selectattr('ifname', 'defined') | map(attribute='ifname') | list }}
+      loop: "{{ sdwan_discovery_interfaces.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"

@@ -1,0 +1,28 @@
+---
+- name: Get deployable devices before SD-WAN changes
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_deployable_before
+
+- name: Display pending deployment targets
+  ansible.builtin.debug:
+    msg: >-
+      {{ (sdwan_deployable_before | default([]))
+         | map(attribute='device.name') | list }}
+
+- name: Require a clean baseline on the selected FTDs
+  ansible.builtin.assert:
+    that:
+      - >-
+        (sdwan_deployable_before | default([]))
+        | selectattr('device.id', 'in',
+                     [sdwan_resolved_hub.device.id,
+                      sdwan_resolved_spoke.device.id])
+        | list | length == 0
+    fail_msg: >-
+      The hub or spoke has pending changes before this SD-WAN run.
+      Deploy or discard those changes separately before setting deploy=true.

@@ -1,0 +1,190 @@
+---
+- name: Get FMC domains
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: sdwan_domains
+
+- name: Require an unambiguous FMC domain
+  ansible.builtin.assert:
+    that:
+      - >-
+        (sdwan_vpn.domain_uuid | default('') | length > 0) or
+        (sdwan_domains | length == 1)
+    fail_msg: >-
+      sdwan_vpn.domain_uuid is required when FMC has more than one domain.
+
+- name: Set SD-WAN domain UUID
+  ansible.builtin.set_fact:
+    sdwan_domain_uuid: >-
+      {{ sdwan_vpn.domain_uuid | default(sdwan_domains[0].uuid, true) }}
+
+- name: Get managed FTDs
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDevice
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    register_as: sdwan_devices
+
+- name: Resolve SD-WAN hub and spoke
+  ansible.builtin.include_tasks: resolve_endpoint.yml
+  loop:
+    - hub
+    - spoke
+  loop_control:
+    loop_var: sdwan_side
+
+- name: Get existing spoke tunnel pools
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    register_as: sdwan_pools
+
+- name: Get existing security zones
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllSecurityZoneObject
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    register_as: sdwan_zones
+
+- name: Get existing S2S topologies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    filters:
+      name: "{{ sdwan_vpn.name }}"
+    register_as: sdwan_topologies
+
+- name: Get hub loopbacks
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_hub_loopbacks
+
+- name: Get hub VTIs
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_hub_vtis
+
+- name: Select exact SD-WAN resources
+  ansible.builtin.set_fact:
+    sdwan_pool_matches: >-
+      {{ (sdwan_pools | default([]))
+         | selectattr('name', 'equalto', sdwan_vpn.spoke_pool.name) | list }}
+    sdwan_zone_matches: >-
+      {{ (sdwan_zones | default([]))
+         | selectattr('name', 'equalto', sdwan_zone_name) | list }}
+    sdwan_vpn_matches: >-
+      {{ (sdwan_topologies | default([]))
+         | selectattr('name', 'equalto', sdwan_vpn.name) | list }}
+    sdwan_loopback_matches: >-
+      {{ (sdwan_hub_loopbacks | default([]))
+         | selectattr('ifname', 'equalto', sdwan_vpn.hub.loopback.ifname)
+         | list }}
+    sdwan_loopback_id_matches: >-
+      {{ (sdwan_hub_loopbacks | default([]))
+         | selectattr('loopbackId', 'equalto', sdwan_vpn.hub.loopback.id)
+         | list }}
+    sdwan_vti_matches: >-
+      {{ (sdwan_hub_vtis | default([]))
+         | selectattr('ifname', 'equalto', sdwan_vpn.hub.tunnel.ifname)
+         | list }}
+    sdwan_vti_id_matches: >-
+      {{ (sdwan_hub_vtis | default([]))
+         | selectattr('tunnelId', 'equalto', sdwan_vpn.hub.tunnel.id)
+         | list }}
+
+- name: Read matching spoke tunnel pool
+  cisco.fmcansible.fmc_configuration:
+    operation: getIPv4AddressPool
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_pool_matches[0].id }}"
+    register_as: sdwan_existing_pool
+  when: sdwan_pool_matches | length == 1
+
+- name: Read matching security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: getSecurityZoneObject
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_zone_matches[0].id }}"
+    register_as: sdwan_existing_zone
+  when: sdwan_zone_matches | length == 1
+
+- name: Read matching S2S topology
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_vpn_matches[0].id }}"
+    register_as: sdwan_existing_vpn
+  when: sdwan_vpn_matches | length == 1
+
+- name: Read matching hub loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+      objectId: "{{ sdwan_loopback_matches[0].id }}"
+    register_as: sdwan_existing_loopback
+  when: sdwan_loopback_matches | length == 1
+
+- name: Read matching hub DVTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+      objectId: "{{ sdwan_vti_matches[0].id }}"
+    register_as: sdwan_existing_vti
+  when: sdwan_vti_matches | length == 1
+
+- name: Refuse ambiguous or unowned SD-WAN resources
+  ansible.builtin.assert:
+    that:
+      - sdwan_pool_matches | length <= 1
+      - sdwan_zone_matches | length <= 1
+      - sdwan_vpn_matches | length <= 1
+      - sdwan_loopback_matches | length <= 1
+      - sdwan_loopback_id_matches | length <= 1
+      - sdwan_vti_matches | length <= 1
+      - sdwan_vti_id_matches | length <= 1
+      - >-
+        sdwan_pool_matches | length == 0 or
+        sdwan_existing_pool.description | default('') == sdwan_marker
+      - >-
+        sdwan_zone_matches | length == 0 or
+        (sdwan_existing_zone.name == sdwan_zone_name and
+         sdwan_existing_zone.interfaceMode == 'ROUTED' and
+         sdwan_existing_zone.description | default('') in ['', sdwan_marker])
+      - >-
+        sdwan_vpn_matches | length == 0 or
+        sdwan_existing_vpn.description | default('') == sdwan_marker
+      - >-
+        sdwan_loopback_matches | length == 0 or
+        sdwan_existing_loopback.description | default('') == sdwan_marker
+      - >-
+        sdwan_vti_matches | length == 0 or
+        sdwan_existing_vti.description | default('') == sdwan_marker
+      - >-
+        sdwan_loopback_id_matches | length == 0 or
+        sdwan_loopback_id_matches[0].ifname == sdwan_vpn.hub.loopback.ifname
+      - >-
+        sdwan_vti_id_matches | length == 0 or
+        sdwan_vti_id_matches[0].ifname == sdwan_vpn.hub.tunnel.ifname
+    fail_msg: >-
+      A named SD-WAN resource is duplicated, belongs to another owner, or
+      hub loopback/tunnel ID is already in use. Review the matching resource
+      in the FMC domain before changing sdwan_vpn.

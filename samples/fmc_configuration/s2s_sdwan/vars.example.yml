@@ -1,0 +1,25 @@
+---
+s2s_vpn:
+  mode: sdwan
+  name: example-sdwan
+  state: present
+  deploy: false
+  domain_uuid: ""
+  spoke_pool:
+    name: example-sdwan-tunnel-pool
+    range: 198.18.94.10-198.18.94.50
+    mask: 255.255.255.0
+  hub:
+    device: hub-ftd
+    source_interface: outside
+    loopback:
+      id: 94
+      ifname: sdwan-hub-lo
+      address: 198.18.94.1
+      netmask: 255.255.255.255
+    tunnel:
+      id: 94
+      ifname: sdwan-hub-dvti
+  spoke:
+    device: spoke-ftd
+    source_interface: outside

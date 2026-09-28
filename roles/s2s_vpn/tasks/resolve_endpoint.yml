@@ -1,0 +1,103 @@
+---
+- name: Select the {{ sdwan_side }} device
+  ansible.builtin.set_fact:
+    sdwan_device_matches: >-
+      {{ (sdwan_devices | default([]))
+         | selectattr('name', 'equalto', sdwan_vpn[sdwan_side].device)
+         | list }}
+
+- name: Require one {{ sdwan_side }} device match
+  ansible.builtin.assert:
+    that:
+      - sdwan_device_matches | length == 1
+    fail_msg: >-
+      sdwan_vpn.{{ sdwan_side }}.device must identify exactly one managed
+      device: {{ sdwan_vpn[sdwan_side].device }}. Found
+      {{ sdwan_device_matches | length }}.
+
+- name: Read the {{ sdwan_side }} device
+  cisco.fmcansible.fmc_configuration:
+    operation: getDevice
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_device_matches[0].id }}"
+    register_as: sdwan_device_readback
+
+- name: Require a managed {{ sdwan_side }} FTD on version 7.3+
+  ansible.builtin.assert:
+    that:
+      - sdwan_device_readback.managementState | default('') == 'MANAGED'
+      - sdwan_device_readback.isConnected | default(false) | bool
+      - >-
+        (sdwan_device_readback.sw_version | default('0.0')
+         | regex_search('[0-9]+[.][0-9]+([.][0-9]+)?'))
+        is version('7.3', '>=')
+    fail_msg: >-
+      {{ sdwan_vpn[sdwan_side].device }} must be a connected managed FTD
+      running version 7.3 or newer. FMC reported
+      {{ sdwan_device_readback.sw_version | default('unknown') }}.
+
+- name: Get physical interfaces on {{ sdwan_side }}
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPhysicalInterface
+    query_params:
+      expanded: true
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_device_matches[0].id }}"
+    register_as: sdwan_physical_interfaces
+
+- name: Select the {{ sdwan_side }} source interface
+  ansible.builtin.set_fact:
+    sdwan_source_matches: >-
+      {{ (((sdwan_physical_interfaces | default([]))
+           | selectattr('name', 'equalto',
+                        sdwan_vpn[sdwan_side].source_interface) | list)
+          + ((sdwan_physical_interfaces | default([]))
+             | selectattr('ifname', 'equalto',
+                          sdwan_vpn[sdwan_side].source_interface) | list))
+         | unique(attribute='id') | list }}
+
+- name: Require one routed {{ sdwan_side }} source interface
+  ansible.builtin.assert:
+    that:
+      - sdwan_source_matches | length == 1
+    fail_msg: >-
+      sdwan_vpn.{{ sdwan_side }}.source_interface must name exactly one
+      physical interface on {{ sdwan_vpn[sdwan_side].device }}.
+
+- name: Read the {{ sdwan_side }} source interface
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_device_matches[0].id }}"
+      objectId: "{{ sdwan_source_matches[0].id }}"
+    register_as: sdwan_source_interface
+
+- name: Check the {{ sdwan_side }} source interface configuration
+  ansible.builtin.assert:
+    that:
+      - sdwan_source_interface.enabled | default(false) | bool
+      - sdwan_source_interface.ifname | default('') | length > 0
+      - sdwan_source_interface.mode | default('NONE') == 'NONE'
+    fail_msg: >-
+      {{ sdwan_vpn[sdwan_side].device }} interface
+      {{ sdwan_vpn[sdwan_side].source_interface }} must be enabled,
+      named, and routed before SD-WAN configuration.
+
+- name: Store the resolved {{ sdwan_side }} endpoint
+  ansible.builtin.set_fact:
+    "sdwan_resolved_{{ sdwan_side }}":
+      device:
+        id: "{{ sdwan_device_matches[0].id }}"
+        name: "{{ sdwan_device_matches[0].name }}"
+        type: Device
+      source_interface:
+        id: "{{ sdwan_source_interface.id }}"
+        name: "{{ sdwan_source_interface.name }}"
+        type: PhysicalInterface
+      source_interface_nameif:
+        id: "{{ sdwan_source_interface.id }}"
+        name: "{{ sdwan_source_interface.ifname }}"
+        type: PhysicalInterface

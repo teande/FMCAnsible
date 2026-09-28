@@ -1,0 +1,489 @@
+---
+- name: Validate spoke pool values for creation
+  ansible.builtin.assert:
+    that:
+      - sdwan_vpn.spoke_pool.range | length > 0
+      - (sdwan_vpn.spoke_pool.mask | ansible.utils.ipaddr('netmask')) is string
+      - (sdwan_vpn.hub.loopback.netmask | ansible.utils.ipaddr('netmask')) is string
+    fail_msg: >-
+      sdwan_vpn.spoke_pool.range and mask, and
+      sdwan_vpn.hub.loopback.netmask are required for state=present.
+
+- name: Create spoke tunnel address pool
+  cisco.fmcansible.fmc_configuration:
+    operation: createIPv4AddressPool
+    data:
+      name: "{{ sdwan_vpn.spoke_pool.name }}"
+      type: IPv4AddressPool
+      description: "{{ sdwan_marker }}"
+      ipAddressRange: "{{ sdwan_vpn.spoke_pool.range }}"
+      mask: "{{ sdwan_vpn.spoke_pool.mask }}"
+      addressType: RANGE
+      overridable: false
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    register_as: sdwan_created_pool
+  when: sdwan_pool_matches | length == 0
+
+- name: Set spoke tunnel address pool
+  ansible.builtin.set_fact:
+    sdwan_pool: >-
+      {{ sdwan_existing_pool if sdwan_pool_matches | length == 1
+         else sdwan_created_pool }}
+
+- name: Read spoke tunnel address pool
+  cisco.fmcansible.fmc_configuration:
+    operation: getIPv4AddressPool
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_pool.id }}"
+    register_as: sdwan_pool_readback
+
+- name: Verify spoke tunnel address pool
+  ansible.builtin.assert:
+    that:
+      - sdwan_pool_readback.name == sdwan_vpn.spoke_pool.name
+      - sdwan_pool_readback.description == sdwan_marker
+      - sdwan_pool_readback.ipAddressRange == sdwan_vpn.spoke_pool.range
+      - sdwan_pool_readback.mask == sdwan_vpn.spoke_pool.mask
+    fail_msg: >-
+      Spoke IPv4 address pool {{ sdwan_vpn.spoke_pool.name }} differs from
+      sdwan_vpn.spoke_pool. Correct the input or reconcile the existing pool.
+
+- name: Create routed VTI security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleSecurityZoneObject
+    data:
+      - name: "{{ sdwan_zone_name }}"
+        type: SecurityZone
+        description: "{{ sdwan_marker }}"
+        interfaceMode: ROUTED
+        interfaces: []
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    query_params:
+      bulk: true
+    register_as: sdwan_created_zones
+  when: sdwan_zone_matches | length == 0
+
+- name: Set routed VTI security zone
+  ansible.builtin.set_fact:
+    sdwan_zone: >-
+      {{ sdwan_existing_zone if sdwan_zone_matches | length == 1
+         else sdwan_created_zones[0] }}
+
+- name: Read routed VTI security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: getSecurityZoneObject
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_zone.id }}"
+    register_as: sdwan_zone_readback
+
+- name: Verify routed VTI security zone
+  ansible.builtin.assert:
+    that:
+      - sdwan_zone_readback.name == sdwan_zone_name
+      - sdwan_zone_readback.description | default('') in ['', sdwan_marker]
+      - sdwan_zone_readback.interfaceMode == 'ROUTED'
+    fail_msg: >-
+      Security zone {{ sdwan_zone_name }} must be a routed zone
+      owned by this SD-WAN example.
+
+- name: Create hub loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDLoopbackInterface
+    data:
+      type: LoopbackInterface
+      loopbackId: "{{ sdwan_vpn.hub.loopback.id }}"
+      ifname: "{{ sdwan_vpn.hub.loopback.ifname }}"
+      description: "{{ sdwan_marker }}"
+      enabled: true
+      ipv4:
+        static:
+          address: "{{ sdwan_vpn.hub.loopback.address }}"
+          netmask: "{{ sdwan_vpn.hub.loopback.netmask }}"
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+    register_as: sdwan_created_loopback
+  when: sdwan_loopback_matches | length == 0
+
+- name: Set hub loopback
+  ansible.builtin.set_fact:
+    sdwan_hub_loopback: >-
+      {{ sdwan_existing_loopback if sdwan_loopback_matches | length == 1
+         else sdwan_created_loopback }}
+
+- name: Read hub loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+      objectId: "{{ sdwan_hub_loopback.id }}"
+    register_as: sdwan_loopback_readback
+
+- name: Verify hub loopback
+  ansible.builtin.assert:
+    that:
+      - sdwan_loopback_readback.loopbackId == sdwan_vpn.hub.loopback.id
+      - sdwan_loopback_readback.ifname == sdwan_vpn.hub.loopback.ifname
+      - sdwan_loopback_readback.description == sdwan_marker
+      - sdwan_loopback_readback.enabled | bool
+      - >-
+        sdwan_loopback_readback.ipv4.static.address
+        == sdwan_vpn.hub.loopback.address
+      - >-
+        sdwan_loopback_readback.ipv4.static.netmask
+        == sdwan_vpn.hub.loopback.netmask
+    fail_msg: >-
+      Hub loopback {{ sdwan_vpn.hub.loopback.ifname }} on
+      {{ sdwan_vpn.hub.device }} differs from sdwan_vpn.hub.loopback.
+
+- name: Create hub DVTI borrowing the loopback address
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleFTDVTIInterface
+    data:
+      type: VTIInterface
+      tunnelSource: "{{ sdwan_resolved_hub.source_interface }}"
+      tunnelType: DYNAMIC
+      tunnelId: "{{ sdwan_vpn.hub.tunnel.id }}"
+      ifname: "{{ sdwan_vpn.hub.tunnel.ifname }}"
+      description: "{{ sdwan_marker }}"
+      enabled: true
+      securityZone:
+        id: "{{ sdwan_zone_readback.id }}"
+        name: "{{ sdwan_zone_readback.name }}"
+        type: SecurityZone
+      ipAddressAssignmentType: BORROW_IP_FROM_INTERFACE
+      borrowIPfrom:
+        id: "{{ sdwan_loopback_readback.id }}"
+        name: >-
+          {{ sdwan_loopback_readback.name
+             | default(sdwan_loopback_readback.ifname, true) }}
+        type: LoopbackInterface
+      ipsecMode: ipv4
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+    register_as: sdwan_created_hub_vti
+  when: sdwan_vti_matches | length == 0
+
+- name: Set hub DVTI
+  ansible.builtin.set_fact:
+    sdwan_hub_vti: >-
+      {{ sdwan_existing_vti if sdwan_vti_matches | length == 1
+         else sdwan_created_hub_vti }}
+
+- name: Read hub DVTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_hub.device.id }}"
+      objectId: "{{ sdwan_hub_vti.id }}"
+    register_as: sdwan_hub_vti_readback
+
+- name: Verify borrowed-IP hub DVTI
+  ansible.builtin.assert:
+    that:
+      - sdwan_hub_vti_readback.tunnelType == 'DYNAMIC'
+      - sdwan_hub_vti_readback.tunnelId == sdwan_vpn.hub.tunnel.id
+      - sdwan_hub_vti_readback.ifname == sdwan_vpn.hub.tunnel.ifname
+      - sdwan_hub_vti_readback.description == sdwan_marker
+      - sdwan_hub_vti_readback.enabled | bool
+      - sdwan_hub_vti_readback.borrowIPfrom.id == sdwan_loopback_readback.id
+      - sdwan_hub_vti_readback.tunnelSource.id == sdwan_resolved_hub.source_interface.id
+      - sdwan_hub_vti_readback.securityZone.id == sdwan_zone_readback.id
+      - sdwan_hub_vti_readback.ipAddressAssignmentType == 'BORROW_IP_FROM_INTERFACE'
+    fail_msg: >-
+      Hub DVTI {{ sdwan_vpn.hub.tunnel.ifname }} on
+      {{ sdwan_vpn.hub.device }} differs from the requested borrowed-IP VTI.
+
+- name: Create AUTO_VPN topology
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDS2SVpnModel
+    data:
+      name: "{{ sdwan_vpn.name }}"
+      type: FTDS2SVpn
+      description: "{{ sdwan_marker }}"
+      topologyType: AUTO_VPN
+      routeBased: true
+      ikeV1Enabled: false
+      ikeV2Enabled: true
+      enableEcmpAtHub: false
+      enableEcmpAtSpoke: false
+      autoVpnSettings:
+        spokeSvtiSecurityZone:
+          id: "{{ sdwan_zone_readback.id }}"
+          name: "{{ sdwan_zone_readback.name }}"
+          type: SecurityZone
+        routeSettings:
+          enableBgp: false
+          enableMultiPath: false
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+    register_as: sdwan_created_vpn
+  when: sdwan_vpn_matches | length == 0
+
+- name: Set AUTO_VPN topology
+  ansible.builtin.set_fact:
+    sdwan_topology: >-
+      {{ sdwan_existing_vpn if sdwan_vpn_matches | length == 1
+         else sdwan_created_vpn }}
+
+- name: Read AUTO_VPN topology
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      objectId: "{{ sdwan_topology.id }}"
+    register_as: sdwan_topology_readback
+
+- name: Verify AUTO_VPN topology
+  ansible.builtin.assert:
+    that:
+      - sdwan_topology_readback.name == sdwan_vpn.name
+      - sdwan_topology_readback.description == sdwan_marker
+      - sdwan_topology_readback.topologyType == 'AUTO_VPN'
+      - sdwan_topology_readback.routeBased | bool
+      - not sdwan_topology_readback.ikeV1Enabled | bool
+      - sdwan_topology_readback.ikeV2Enabled | bool
+      - >-
+        sdwan_topology_readback.autoVpnSettings.spokeSvtiSecurityZone.id
+        == sdwan_zone_readback.id
+    fail_msg: >-
+      Topology {{ sdwan_vpn.name }} does not match the requested AUTO_VPN
+      route-based configuration.
+
+- name: Get topology IPsec settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnIPSecSettings
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_ipsec_settings
+
+- name: Require one topology IPsec settings object
+  ansible.builtin.assert:
+    that:
+      - sdwan_ipsec_settings | length == 1
+    fail_msg: >-
+      Expected one IPsec settings object for {{ sdwan_vpn.name }}.
+
+- name: Disable reverse-route injection for answer-only hub
+  cisco.fmcansible.fmc_configuration:
+    operation: updateVpnIPSecSettings
+    data:
+      id: "{{ sdwan_ipsec_settings[0].id }}"
+      type: IPSecSettings
+      cryptoMapType: "{{ sdwan_ipsec_settings[0].cryptoMapType }}"
+      ikeV2Mode: "{{ sdwan_ipsec_settings[0].ikeV2Mode }}"
+      enableSaStrengthEnforcement: >-
+        {{ sdwan_ipsec_settings[0].enableSaStrengthEnforcement | default(false) }}
+      enableRRI: false
+      lifetimeSeconds: "{{ sdwan_ipsec_settings[0].lifetimeSeconds }}"
+      lifetimeKilobytes: "{{ sdwan_ipsec_settings[0].lifetimeKilobytes }}"
+      perfectForwardSecrecy: "{{ sdwan_ipsec_settings[0].perfectForwardSecrecy }}"
+      validateIncomingIcmpErrorMessage: >-
+        {{ sdwan_ipsec_settings[0].validateIncomingIcmpErrorMessage | default(false) }}
+      doNotFragmentPolicy: "{{ sdwan_ipsec_settings[0].doNotFragmentPolicy }}"
+      tfcPackets: "{{ sdwan_ipsec_settings[0].tfcPackets }}"
+      ikeV2IpsecProposal: "{{ sdwan_ipsec_settings[0].ikeV2IpsecProposal }}"
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+      objectId: "{{ sdwan_ipsec_settings[0].id }}"
+  when: sdwan_ipsec_settings[0].enableRRI | default(false) | bool
+
+- name: Read topology IPsec settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getVpnIPSecSettings
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+      objectId: "{{ sdwan_ipsec_settings[0].id }}"
+    register_as: sdwan_ipsec_readback
+
+- name: Verify reverse-route injection is disabled
+  ansible.builtin.assert:
+    that:
+      - not sdwan_ipsec_readback.enableRRI | bool
+    fail_msg: >-
+      IPsec settings on {{ sdwan_vpn.name }} still enable reverse-route
+      injection. The answer-only hub requires enableRRI=false.
+
+- name: Get current AUTO_VPN endpoints
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_existing_endpoints
+
+- name: Select hub and spoke endpoints
+  ansible.builtin.set_fact:
+    sdwan_existing_hub_endpoints: >-
+      {{ (sdwan_existing_endpoints | default([]))
+         | selectattr('peerType', 'equalto', 'HUB') | list }}
+    sdwan_existing_spoke_endpoints: >-
+      {{ (sdwan_existing_endpoints | default([]))
+         | selectattr('peerType', 'equalto', 'SPOKE') | list }}
+
+- name: Refuse unexpected AUTO_VPN endpoints
+  ansible.builtin.assert:
+    that:
+      - sdwan_existing_endpoints | length <= 2
+      - sdwan_existing_hub_endpoints | length <= 1
+      - sdwan_existing_spoke_endpoints | length <= 1
+      - >-
+        sdwan_existing_hub_endpoints | length == 0 or
+        sdwan_existing_hub_endpoints[0].device.id == sdwan_resolved_hub.device.id
+      - >-
+        sdwan_existing_spoke_endpoints | length == 0 or
+        sdwan_existing_spoke_endpoints[0].device.id == sdwan_resolved_spoke.device.id
+    fail_msg: >-
+      Topology {{ sdwan_vpn.name }} contains unexpected endpoints. Review
+      them in FMC before rerunning this example.
+
+- name: Create AUTO_VPN hub endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: createVpnEndpoint
+    data:
+      peerType: HUB
+      device: "{{ sdwan_resolved_hub.device }}"
+      interface:
+        id: "{{ sdwan_hub_vti_readback.id }}"
+        name: "{{ sdwan_hub_vti_readback.ifname }}"
+        type: VTI
+      tunnelSourceInterface: "{{ sdwan_resolved_hub.source_interface_nameif }}"
+      ipv4PoolsForSpokeVti:
+        - id: "{{ sdwan_pool_readback.id }}"
+          name: "{{ sdwan_pool_readback.name }}"
+          type: IPv4AddressPool
+      sendTunnelInterfaceIpToPeer: true
+      allowIncomingIKEv2Routes: true
+      protectedNetworks: {}
+      connectionType: ANSWER_ONLY
+      isLocalTunnelIdEnabled: false
+      type: EndPoint
+      overrideRemoteVpnFilter: false
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+    register_as: sdwan_created_hub_endpoint
+  when: sdwan_existing_hub_endpoints | length == 0
+
+- name: Get spoke VTIs before endpoint creation
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_spoke.device.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_spoke_vtis_before
+
+- name: Create AUTO_VPN spoke endpoint and generated SVTI
+  cisco.fmcansible.fmc_configuration:
+    operation: createVpnEndpoint
+    data:
+      peerType: SPOKE
+      device: "{{ sdwan_resolved_spoke.device }}"
+      interface: "{{ sdwan_resolved_spoke.source_interface_nameif }}"
+      tunnelSourceInterface: "{{ sdwan_resolved_spoke.source_interface_nameif }}"
+      protectedNetworks: {}
+      connectionType: ORIGINATE_ONLY
+      isLocalTunnelIdEnabled: false
+      type: EndPoint
+      overrideRemoteVpnFilter: false
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+    register_as: sdwan_created_spoke_endpoint
+  when: sdwan_existing_spoke_endpoints | length == 0
+
+- name: Get spoke VTIs after endpoint creation
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_spoke.device.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_spoke_vtis_after
+
+- name: Select generated spoke SVTI
+  ansible.builtin.set_fact:
+    sdwan_spoke_vti_candidates: >-
+      {{ (sdwan_spoke_vtis_after | default([]))
+         | rejectattr('id', 'in',
+                      sdwan_spoke_vtis_before | default([])
+                      | map(attribute='id') | list)
+         | list
+         if sdwan_existing_spoke_endpoints | length == 0
+         else (sdwan_spoke_vtis_after | default([]))
+         | selectattr('securityZone.id', 'equalto', sdwan_zone_readback.id)
+         | selectattr('tunnelSource.id', 'equalto',
+                      sdwan_resolved_spoke.source_interface.id)
+         | selectattr('tunnelType', 'equalto', 'STATIC') | list }}
+
+- name: Require one generated spoke SVTI
+  ansible.builtin.assert:
+    that:
+      - sdwan_spoke_vti_candidates | length == 1
+    fail_msg: >-
+      Expected one generated spoke SVTI for {{ sdwan_vpn.name }} on
+      {{ sdwan_vpn.spoke.device }}. Found {{ sdwan_spoke_vti_candidates | length }}.
+
+- name: Read generated spoke SVTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_resolved_spoke.device.id }}"
+      objectId: "{{ sdwan_spoke_vti_candidates[0].id }}"
+    register_as: sdwan_spoke_vti_readback
+
+- name: Verify generated spoke SVTI
+  ansible.builtin.assert:
+    that:
+      - sdwan_spoke_vti_readback.type == 'VTIInterface'
+      - sdwan_spoke_vti_readback.tunnelType == 'STATIC'
+      - sdwan_spoke_vti_readback.enabled | bool
+      - sdwan_spoke_vti_readback.securityZone.id == sdwan_zone_readback.id
+      - >-
+        sdwan_spoke_vti_readback.tunnelSource.id
+        == sdwan_resolved_spoke.source_interface.id
+    fail_msg: >-
+      The generated spoke SVTI does not match the selected security zone
+      and source interface.
+
+- name: Read completed AUTO_VPN endpoints
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ sdwan_domain_uuid }}"
+      containerUUID: "{{ sdwan_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: sdwan_endpoint_readback
+
+- name: Verify completed AUTO_VPN endpoints
+  ansible.builtin.assert:
+    that:
+      - sdwan_endpoint_readback | length == 2
+      - >-
+        (sdwan_endpoint_readback | selectattr('peerType', 'equalto', 'HUB')
+         | first).interface.id == sdwan_hub_vti_readback.id
+      - >-
+        (sdwan_endpoint_readback | selectattr('peerType', 'equalto', 'SPOKE')
+         | first).device.id == sdwan_resolved_spoke.device.id
+    fail_msg: >-
+      AUTO_VPN {{ sdwan_vpn.name }} must contain exactly the selected
+      hub DVTI and spoke device.
