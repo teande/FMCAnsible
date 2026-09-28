@@ -37,10 +37,12 @@ build_ignore:
   - .github
   - .gitignore
   - ansible.cfg
+  - Jenkinsfile
 
   # Development and test tooling
   - tests
   - scripts
+  - docs/Testing.md
   - test-requirements.txt
   - Dockerfile
   - Dockerfile_integration
