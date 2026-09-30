@@ -1,0 +1,39 @@
+---
+- name: Validate RAVPN profile {{ ra_input_profile.name | default('unnamed') }}
+  ansible.builtin.assert:
+    that:
+      - ra_input_profile.name | default('') | length > 0
+      - ra_input_profile.authentication | default('') in ['ad', 'local']
+      - ra_input_profile.realm | default('') | length > 0
+      - ra_input_profile.alias | default(ra_input_profile.name) | length > 0
+    fail_msg: >-
+      Each ravpn.profiles item needs name, authentication=ad|local, realm,
+      and optionally alias.
+
+- name: Select realm for profile {{ ra_input_profile.name }}
+  ansible.builtin.set_fact:
+    ra_realm_matches: >-
+      {{ ra_realms
+         | selectattr('name', 'equalto', ra_input_profile.realm) | list }}
+
+- name: Require matching identity realm for profile {{ ra_input_profile.name }}
+  ansible.builtin.assert:
+    that:
+      - ra_realm_matches | length == 1
+      - >-
+        ra_realm_matches[0].realmType
+        == ('AD' if ra_input_profile.authentication == 'ad' else 'LOCAL')
+    fail_msg: >-
+      Profile {{ ra_input_profile.name }} needs exactly one existing
+      {{ 'AD' if ra_input_profile.authentication == 'ad' else 'LOCAL' }}
+      realm named {{ ra_input_profile.realm }}.
+
+- name: Store resolved profile {{ ra_input_profile.name }}
+  ansible.builtin.set_fact:
+    ra_resolved_profiles: >-
+      {{ ra_resolved_profiles + [{
+           'name': ravpn.name ~ '-' ~ ra_input_profile.name,
+           'alias': ra_input_profile.alias | default(ra_input_profile.name),
+           'authentication': ra_input_profile.authentication,
+           'realm': ra_realm_matches[0]
+         }] }}

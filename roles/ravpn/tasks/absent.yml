@@ -1,0 +1,178 @@
+---
+- name: Get RAVPN assignments before removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_assignments_for_removal
+  when: ra_policy_matches | length == 1
+
+- name: Select RAVPN assignments for removal
+  ansible.builtin.set_fact:
+    ra_assignment_matches: >-
+      {{ ra_assignments_for_removal
+         | selectattr('policy', 'defined')
+         | selectattr('policy.id', 'equalto', ra_existing_policy.id)
+         | list }}
+  when: ra_policy_matches | length == 1
+
+- name: Refuse ambiguous or foreign RAVPN assignments
+  ansible.builtin.assert:
+    that:
+      - ra_assignment_matches | length <= 1
+      - >-
+        ra_assignment_matches | length == 0 or
+        (ra_assignment_matches[0].targets | default([])
+         | rejectattr('id', 'equalto', ra_device.id) | list | length == 0)
+    fail_msg: >-
+      {{ ravpn.name }} is assigned outside {{ ra_device.name }}. Unassign
+      unexpected FTDs manually before this role removes the policy.
+  when: ra_policy_matches | length == 1
+
+- name: Unassign owned RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: updatePolicyAssignment
+    data:
+      id: "{{ ra_assignment_matches[0].id }}"
+      type: PolicyAssignment
+      policy:
+        id: "{{ ra_existing_policy.id }}"
+        name: "{{ ra_existing_policy.name }}"
+        type: "{{ ra_existing_policy.type }}"
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_assignment_matches[0].id }}"
+  when:
+    - ra_policy_matches | length == 1
+    - ra_assignment_matches | length == 1
+    - ra_assignment_matches[0].targets | default([]) | length > 0
+
+- name: Read RAVPN assignments after unassignment
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_assignments_after_removal
+  when: ra_policy_matches | length == 1
+
+- name: Require no assigned targets for owned RAVPN
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_assignments_after_removal
+        | selectattr('policy', 'defined')
+        | selectattr('policy.id', 'equalto', ra_existing_policy.id)
+        | selectattr('targets', 'defined')
+        | map(attribute='targets') | flatten | list | length == 0
+    fail_msg: >-
+      {{ ravpn.name }} is still assigned and cannot be removed safely.
+  when: ra_policy_matches | length == 1
+
+- name: Delete owned RAVPN connection profiles
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_existing_policy.id }}"
+      objectId: "{{ ra_profile_for_removal.id }}"
+  loop: "{{ ra_existing_profiles | default([]) }}"
+  loop_control:
+    loop_var: ra_profile_for_removal
+    label: "{{ ra_profile_for_removal.name }}"
+  when: ra_policy_matches | length == 1
+
+- name: Read RAVPN connection profiles after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_existing_policy.id }}"
+    register_as: ra_profiles_after_removal
+  when: ra_policy_matches | length == 1
+
+- name: Require no remaining RAVPN connection profiles
+  ansible.builtin.assert:
+    that:
+      - ra_profiles_after_removal | length == 0
+  when: ra_policy_matches | length == 1
+
+- name: Delete owned RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_existing_policy.id }}"
+  when: ra_policy_matches | length == 1
+
+- name: Delete owned RAVPN group policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteGroupPolicyModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_existing_group.id }}"
+  when: ra_group_matches | length == 1
+
+- name: Delete owned RAVPN address pool
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteIPv4AddressPool
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_existing_pool.id }}"
+  when: ra_pool_matches | length == 1
+
+- name: Delete owned RAVPN dynamic access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_existing_dap.id }}"
+  when: ra_dap_matches | length == 1
+
+- name: Read RAVPN policies after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ravpn.name }}"
+    register_as: ra_policies_after_removal
+
+- name: Read RAVPN group policies after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllGroupPolicyModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_group_name }}"
+    register_as: ra_groups_after_removal
+
+- name: Read RAVPN pools after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_pool_name }}"
+    register_as: ra_pools_after_removal
+
+- name: Read RAVPN DAPs after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_dap_name }}"
+    register_as: ra_daps_after_removal
+
+- name: Verify owned RAVPN resources were removed
+  ansible.builtin.assert:
+    that:
+      - ra_policies_after_removal | selectattr('name', 'equalto', ravpn.name) | list | length == 0
+      - ra_groups_after_removal | selectattr('name', 'equalto', ra_group_name) | list | length == 0
+      - ra_pools_after_removal | selectattr('name', 'equalto', ra_pool_name) | list | length == 0
+      - ra_daps_after_removal | selectattr('name', 'equalto', ra_dap_name) | list | length == 0
+    fail_msg: One or more owned RAVPN resources remain after deletion.

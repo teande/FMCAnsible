@@ -1,0 +1,161 @@
+---
+- name: Require local realm binding is returned before deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_local_profiles | length == 0 or
+        (ra_policy_readback.localRealmServer.id | default('')
+         == ra_local_profiles[0].realm.id)
+    fail_msg: >-
+      FMC omitted localRealmServer from the RAVPN GET response. Local-auth
+      profiles were configured but are not qualified for deployment here.
+  when: ravpn.state | default('present') == 'present'
+
+- name: Get RAVPN policy assignments
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_policy_assignments
+  when: ravpn.state | default('present') == 'present'
+
+- name: Select current RAVPN assignment
+  ansible.builtin.set_fact:
+    ra_current_assignments: >-
+      {{ ra_policy_assignments
+         | selectattr('policy', 'defined')
+         | selectattr('policy.id', 'equalto', ra_policy_readback.id)
+         | list }}
+  when: ravpn.state | default('present') == 'present'
+
+- name: Refuse ambiguous or foreign RAVPN assignments
+  ansible.builtin.assert:
+    that:
+      - ra_current_assignments | length <= 1
+      - >-
+        ra_current_assignments | length == 0 or
+        (ra_current_assignments[0].targets | default([])
+         | rejectattr('id', 'equalto', ra_device.id) | list | length == 0)
+    fail_msg: >-
+      {{ ravpn.name }} is assigned to an unexpected device. Review the
+      assignment before this role deploys it.
+  when: ravpn.state | default('present') == 'present'
+
+- name: Assign RAVPN policy to target device
+  cisco.fmcansible.fmc_configuration:
+    operation: createPolicyAssignment
+    data:
+      name: "{{ ra_policy_readback.name }}"
+      type: PolicyAssignment
+      policy:
+        id: "{{ ra_policy_readback.id }}"
+        name: "{{ ra_policy_readback.name }}"
+        type: "{{ ra_policy_readback.type }}"
+      targets:
+        - id: "{{ ra_device.id }}"
+          name: "{{ ra_device.name }}"
+          type: Device
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_created_assignment
+  when:
+    - ravpn.state | default('present') == 'present'
+    - ra_current_assignments | length == 0
+
+- name: Read RAVPN policy assignments after convergence
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllPolicyAssignment
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_assignments_after_present
+  when: ravpn.state | default('present') == 'present'
+
+- name: Select persisted RAVPN policy assignment
+  ansible.builtin.set_fact:
+    ra_persisted_assignment: >-
+      {{ ra_assignments_after_present
+         | selectattr('policy', 'defined')
+         | selectattr('policy.id', 'equalto', ra_policy_readback.id)
+         | list }}
+  when: ravpn.state | default('present') == 'present'
+
+- name: Verify RAVPN policy assignment
+  ansible.builtin.assert:
+    that:
+      - ra_persisted_assignment | length == 1
+      - ra_persisted_assignment[0].targets | map(attribute='id') | list == [ra_device.id]
+    fail_msg: >-
+      {{ ravpn.name }} must be assigned only to {{ ra_device.name }}.
+  when: ravpn.state | default('present') == 'present'
+
+- name: Get pending deployment state after RAVPN changes
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_deployable_after
+
+- name: Select RAVPN deployment target
+  ansible.builtin.set_fact:
+    ra_pending_target: >-
+      {{ ra_deployable_after
+         | selectattr('device.id', 'equalto', ra_device.id) | list }}
+
+- name: Require RAVPN target is deployable
+  ansible.builtin.assert:
+    that:
+      - ra_pending_target | length <= 1
+      - ra_pending_target | length == 0 or ra_pending_target[0].canBeDeployed | bool
+      - ra_pending_target | length == 0 or not ra_pending_target[0].isDeploying | bool
+    fail_msg: >-
+      {{ ra_device.name }} has RAVPN changes but is not ready for deployment.
+
+- name: Submit RAVPN deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: createDeploymentRequest
+    data:
+      type: DeploymentRequest
+      version: "0"
+      forceDeploy: false
+      ignoreWarning: false
+      deploymentNote: "{{ ravpn.state | default('present') }} {{ ravpn.name }}"
+      deviceList:
+        - "{{ ra_device.id }}"
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+  register: ra_deployment_request
+  when: ra_pending_target | length == 1
+
+- name: Wait for RAVPN deployment
+  cisco.fmcansible.fmc_configuration:
+    operation: getTaskStatus
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_deployment_request.response.metadata.task.id }}"
+    query_params:
+      showDetailedDeviceStatus: true
+  register: ra_deployment_status
+  until: >-
+    ra_deployment_status.response.status | default('') | upper
+    in ['COMPLETED', 'DEPLOYED', 'FAILED']
+  retries: 80
+  delay: 15
+  when: ra_pending_target | length == 1
+
+- name: Require successful RAVPN deployment
+  ansible.builtin.assert:
+    that:
+      - ra_deployment_status.response.status | upper in ['COMPLETED', 'DEPLOYED']
+      - >-
+        ra_deployment_status.response.subTasks | default([])
+        | rejectattr('status', 'equalto', 'SUCCEEDED') | list | length == 0
+    fail_msg: >-
+      RAVPN deployment failed: {{ ra_deployment_status.response.message
+      | default('Review FMC task details') }}.
+  when: ra_pending_target | length == 1

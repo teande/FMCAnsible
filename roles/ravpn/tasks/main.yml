@@ -1,0 +1,60 @@
+---
+- name: Require one RAVPN input mapping
+  ansible.builtin.assert:
+    that:
+      - ravpn is defined
+      - ravpn is mapping
+      - ravpn.name | default('') | length > 0
+      - ravpn.target_device | default('') | length > 0
+      - ravpn.state | default('present') in ['inspect', 'present', 'absent']
+    fail_msg: >-
+      Pass ravpn with a unique name, target_device, and
+      state=inspect|present|absent.
+
+- name: Validate RAVPN configuration inputs
+  ansible.builtin.assert:
+    that:
+      - ravpn.access_zone | default('') | length > 0
+      - ravpn.secure_client.name | default('') | length > 0
+      - ravpn.secure_client.os | default('') in ['WINDOWS', 'LINUX', 'MAC']
+      - ravpn.ikev2_policy | default('') | length > 0
+      - ravpn.certificate | default('') | length > 0
+      - ravpn.pool.range | default('') is match('^[0-9.]+-[0-9.]+$')
+      - (ravpn.pool.mask | default('') | ansible.utils.ipaddr('netmask')) is string
+      - ravpn.group_policy.default_domain | default('') | length > 0
+      - ravpn.profiles | default([]) is sequence
+      - ravpn.profiles | default([]) | length > 0
+      - ravpn.profiles | default([]) | map(attribute='name') | unique | list | length == ravpn.profiles | default([]) | length
+    fail_msg: >-
+      ravpn needs access_zone, secure_client.name/os, ikev2_policy,
+      certificate, pool.range/mask, group_policy.default_domain, and at
+      least one uniquely named profile. See roles/ravpn/README.md.
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Set RAVPN resource names
+  ansible.builtin.set_fact:
+    ra_marker: "Managed by FMCAnsible ravpn: {{ ravpn.name }}"
+    ra_pool_name: "{{ ravpn.name }}-pool"
+    ra_group_name: "{{ ravpn.name }}-gp"
+    ra_dap_name: "{{ ravpn.name }}-dap"
+
+- name: Discover RAVPN resources and prerequisites
+  ansible.builtin.include_tasks: discover.yml
+
+- name: Check RAVPN deployment baseline
+  ansible.builtin.include_tasks: check_deploy_baseline.yml
+  when: ravpn.deploy | default(false) | bool
+
+- name: Ensure RAVPN configuration is present
+  ansible.builtin.include_tasks: present.yml
+  when: ravpn.state | default('present') == 'present'
+
+- name: Ensure RAVPN configuration is absent
+  ansible.builtin.include_tasks: absent.yml
+  when: ravpn.state | default('present') == 'absent'
+
+- name: Deploy RAVPN configuration when requested
+  ansible.builtin.include_tasks: deploy.yml
+  when:
+    - ravpn.state | default('present') != 'inspect'
+    - ravpn.deploy | default(false) | bool

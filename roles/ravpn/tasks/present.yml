@@ -1,0 +1,386 @@
+---
+- name: Create RAVPN IPv4 address pool
+  cisco.fmcansible.fmc_configuration:
+    operation: createIPv4AddressPool
+    data:
+      name: "{{ ra_pool_name }}"
+      type: IPv4AddressPool
+      description: "{{ ra_marker }}"
+      addressType: RANGE
+      ipAddressRange: "{{ ravpn.pool.range }}"
+      mask: "{{ ravpn.pool.mask }}"
+      overridable: false
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_created_pool
+  when: ra_pool_matches | length == 0
+
+- name: Set RAVPN address pool
+  ansible.builtin.set_fact:
+    ra_pool: >-
+      {{ ra_existing_pool if ra_pool_matches | length == 1
+         else ra_created_pool }}
+
+- name: Read RAVPN address pool
+  cisco.fmcansible.fmc_configuration:
+    operation: getIPv4AddressPool
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_pool.id }}"
+    register_as: ra_pool_readback
+
+- name: Verify RAVPN address pool
+  ansible.builtin.assert:
+    that:
+      - ra_pool_readback.name == ra_pool_name
+      - ra_pool_readback.description == ra_marker
+      - ra_pool_readback.ipAddressRange == ravpn.pool.range
+      - ra_pool_readback.mask == ravpn.pool.mask
+      - ra_pool_readback.addressType == 'RANGE'
+    fail_msg: >-
+      {{ ra_pool_name }} differs from ravpn.pool.range/mask. Reconcile the
+      existing pool deliberately rather than creating another one.
+
+- name: Create RAVPN dynamic access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: createDynamicAccessPolicy
+    data:
+      name: "{{ ra_dap_name }}"
+      type: DynamicAccessPolicy
+      description: "{{ ra_marker }}"
+      dapXmlConfig: >-
+        {{ '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><dapRecordList/>'
+           | b64encode }}
+      authorizationAttributes:
+        - priority: -1
+          dapRecordName: DfltAccessPolicy
+          action: CONTINUE
+          message: Default RAVPN access policy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_created_dap
+  when: ra_dap_matches | length == 0
+
+- name: Set RAVPN dynamic access policy
+  ansible.builtin.set_fact:
+    ra_dap: >-
+      {{ ra_existing_dap if ra_dap_matches | length == 1
+         else ra_created_dap }}
+
+- name: Read RAVPN dynamic access policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_dap.id }}"
+    register_as: ra_dap_readback
+
+- name: Verify RAVPN dynamic access policy
+  ansible.builtin.assert:
+    that:
+      - ra_dap_readback.name == ra_dap_name
+      - ra_dap_readback.description == ra_marker
+      - ra_dap_readback.authorizationAttributes | length == 1
+      - ra_dap_readback.authorizationAttributes[0].dapRecordName == 'DfltAccessPolicy'
+      - ra_dap_readback.authorizationAttributes[0].action == 'CONTINUE'
+
+- name: Set requested RAVPN group policy values
+  ansible.builtin.set_fact:
+    ra_group_banner: >-
+      {{ ravpn.group_policy.banner | default('Authorized access only') }}
+    ra_group_split: >-
+      {{ ravpn.group_policy.ipv4_split_tunnel_policy | default('TUNNEL_ALL') }}
+    ra_group_simultaneous_logins: >-
+      {{ ravpn.group_policy.simultaneous_logins | default(2) | int }}
+    ra_group_idle_timeout: >-
+      {{ ravpn.group_policy.vpn_idle_timeout | default(30) | int }}
+    ra_group_mtu: >-
+      {{ ravpn.group_policy.mtu | default(1406) | int }}
+
+- name: Validate requested RAVPN group policy values
+  ansible.builtin.assert:
+    that:
+      - ra_group_split == 'TUNNEL_ALL'
+      - ra_group_simultaneous_logins | int >= 1
+      - ra_group_idle_timeout | int >= 0
+      - ra_group_mtu | int >= 576
+      - ra_group_mtu | int <= 1500
+    fail_msg: >-
+      ravpn.group_policy currently supports only TUNNEL_ALL or has invalid
+      simultaneous_logins, vpn_idle_timeout, or mtu value.
+
+- name: Create RAVPN group policy
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleGroupPolicyModel
+    data:
+      name: "{{ ra_group_name }}"
+      type: GroupPolicy
+      description: "{{ ra_marker }}"
+      enableSSLProtocol: true
+      enableIPsecIKEv2Protocol: true
+      generalSettings:
+        banner: "{{ ra_group_banner }}"
+        addressAssignment:
+          defaultDomainName: "{{ ravpn.group_policy.default_domain }}"
+          ipv4LocalAddressPool:
+            - name: "{{ ra_pool_readback.name }}"
+              id: "{{ ra_pool_readback.id }}"
+              type: "{{ ra_pool_readback.type }}"
+        splitTunnelSettings:
+          ipv4SplitTunnelPolicy: "{{ ra_group_split }}"
+          ipv6SplitTunnelPolicy: TUNNEL_ALL
+          splitDNSRequestPolicy: USE_SPLIT_TUNNEL_SETTING
+      advancedSettings:
+        sessionSettings:
+          simultaneousLoginPerUser: "{{ ra_group_simultaneous_logins }}"
+          maxConnectionTimeout: 480
+          maxConnectionTimeAlertInterval: 5
+          vpnIdleTimeout: "{{ ra_group_idle_timeout }}"
+          vpnIdleTimeoutAlertInterval: 5
+      anyConnectSettings:
+        sslSettings:
+          mtuSize: "{{ ra_group_mtu }}"
+          ignoreDFBit: false
+          sslCompression: DISABLED
+          dtlsCompression: DISABLED
+        connectionSettings:
+          enableKeepAliveMessages: true
+          keepAliveMessageInterval: 20
+          enableClientDPD: true
+          clientDPDInterval: 30
+          enableGatewayDPD: true
+          gatewayDPDInterval: 30
+          enableSSLRekey: true
+          rekeyMethod: NEW_TUNNEL
+          rekeyInterval: 30
+          bypassUnsupportProtocol: false
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_created_group
+  when: ra_group_matches | length == 0
+
+- name: Set RAVPN group policy
+  ansible.builtin.set_fact:
+    ra_group: >-
+      {{ ra_existing_group if ra_group_matches | length == 1
+         else ra_created_group }}
+
+- name: Read RAVPN group policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getGroupPolicyModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_group.id }}"
+    register_as: ra_group_readback
+
+- name: Verify RAVPN group policy
+  ansible.builtin.assert:
+    that:
+      - ra_group_readback.name == ra_group_name
+      - ra_group_readback.description == ra_marker
+      - ra_group_readback.enableSSLProtocol | bool
+      - ra_group_readback.enableIPsecIKEv2Protocol | bool
+      - ra_group_readback.generalSettings.banner == ra_group_banner
+      - ra_group_readback.generalSettings.addressAssignment.defaultDomainName == ravpn.group_policy.default_domain
+      - ra_group_readback.generalSettings.addressAssignment.ipv4LocalAddressPool[0].id == ra_pool_readback.id
+      - ra_group_readback.generalSettings.splitTunnelSettings.ipv4SplitTunnelPolicy == ra_group_split
+      - ra_group_readback.advancedSettings.sessionSettings.simultaneousLoginPerUser | int == ra_group_simultaneous_logins | int
+      - ra_group_readback.advancedSettings.sessionSettings.vpnIdleTimeout | int == ra_group_idle_timeout | int
+      - ra_group_readback.anyConnectSettings.sslSettings.mtuSize | int == ra_group_mtu | int
+    fail_msg: >-
+      {{ ra_group_name }} does not match ravpn.group_policy. Check banner,
+      default_domain, pool, split tunnel, session, and MTU fields.
+
+- name: Select local RAVPN profiles
+  ansible.builtin.set_fact:
+    ra_local_profiles: >-
+      {{ ra_resolved_profiles
+         | selectattr('authentication', 'equalto', 'local') | list }}
+
+- name: Create RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDRAVpnModel
+    data: >-
+      {{ {
+           'name': ravpn.name,
+           'type': 'RAVpn',
+           'description': ra_marker,
+           'configureSSL': true,
+           'configureIpsec': true,
+           'ikev2Policies': [
+             {'name': ra_ikev2_matches[0].name,
+              'id': ra_ikev2_matches[0].id,
+              'type': ra_ikev2_matches[0].type}
+           ],
+           'accessInterfaceSettings': {
+             'bypassACPolicyForDecryptTraffic': false,
+             'interfaceSettings': [
+               {'accessInterface': {
+                   'name': ra_zone_matches[0].name,
+                   'id': ra_zone_matches[0].id,
+                   'type': ra_zone_matches[0].type},
+                'configureInterfaceIDCertificate': false,
+                'enableSSL': true,
+                'enableIPSecIkev2': true,
+                'enableDTLS': true}
+             ],
+             'webPort': 443,
+             'sslIdCertificate': {
+               'name': ra_certificate_matches[0].name,
+               'id': ra_certificate_matches[0].id,
+               'type': ra_certificate_matches[0].type},
+             'ipsecIdCertificate': {
+               'name': ra_certificate_matches[0].name,
+               'id': ra_certificate_matches[0].id,
+               'type': ra_certificate_matches[0].type},
+             'allowConnectionProfileSelection': true,
+             'dtlsPort': 443
+           },
+           'groupPolicies': [
+             {'name': ra_group_readback.name,
+              'id': ra_group_readback.id,
+              'type': ra_group_readback.type}
+           ],
+           'anyConnectClientImages': [
+             {'operatingSystem': ravpn.secure_client.os,
+              'anyconnectImage': {
+                'name': ra_package_matches[0].name,
+                'id': ra_package_matches[0].id,
+                'type': ra_package_matches[0].type}}
+           ],
+           'dapPolicy': {
+             'name': ra_dap_readback.name,
+             'id': ra_dap_readback.id,
+             'type': ra_dap_readback.type}
+         }
+         | combine(
+             {'localRealmServer': {
+                'name': ra_local_profiles[0].realm.name,
+                'id': ra_local_profiles[0].realm.id,
+                'type': ra_local_profiles[0].realm.type}}
+             if ra_local_profiles | length > 0 else {}
+           ) }}
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_created_policy
+  when: ra_policy_matches | length == 0
+
+- name: Set RAVPN policy
+  ansible.builtin.set_fact:
+    ra_policy: >-
+      {{ ra_existing_policy if ra_policy_matches | length == 1
+         else ra_created_policy }}
+
+- name: Read RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_policy.id }}"
+    register_as: ra_policy_readback
+
+- name: Verify RAVPN policy references
+  ansible.builtin.assert:
+    that:
+      - ra_policy_readback.name == ravpn.name
+      - ra_policy_readback.description == ra_marker
+      - ra_policy_readback.configureSSL | bool
+      - ra_policy_readback.configureIpsec | bool
+      - ra_policy_readback.ikev2Policies | map(attribute='id') | list == [ra_ikev2_matches[0].id]
+      - ra_policy_readback.accessInterfaceSettings.interfaceSettings[0].accessInterface.id == ra_zone_matches[0].id
+      - ra_policy_readback.accessInterfaceSettings.sslIdCertificate.id == ra_certificate_matches[0].id
+      - ra_policy_readback.groupPolicies | map(attribute='id') | list == [ra_group_readback.id]
+      - ra_policy_readback.dapPolicy.id == ra_dap_readback.id
+      - ra_policy_readback.anyConnectClientImages[0].anyconnectImage.id == ra_package_matches[0].id
+    fail_msg: >-
+      {{ ravpn.name }} does not reference the requested IKEv2 policy, access
+      zone, certificate, group policy, DAP, or Secure Client image.
+
+- name: Get RAVPN address assignment settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnAddressAssignmentSetting
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+    register_as: ra_address_assignments
+
+- name: Require one RAVPN address assignment setting
+  ansible.builtin.assert:
+    that:
+      - ra_address_assignments | length == 1
+
+- name: Enable internal IPv4 address pool assignment
+  cisco.fmcansible.fmc_configuration:
+    operation: updateFTDRAVpnAddressAssignmentSetting
+    data:
+      id: "{{ ra_address_assignments[0].id }}"
+      type: RaVpnAddressAssignmentSetting
+      useAuthorizationServerForIPv4: false
+      useDHCP: false
+      useInternalAddressPoolForIPv4: true
+      ipAddressReuseInterval: 0
+      useAuthorizationServerForIPv6: false
+      useInternalAddressPoolForIPv6: false
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_address_assignments[0].id }}"
+  when: not ra_address_assignments[0].useInternalAddressPoolForIPv4 | default(false) | bool
+
+- name: Read RAVPN address assignment setting
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnAddressAssignmentSetting
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_address_assignments[0].id }}"
+    register_as: ra_address_assignment_readback
+
+- name: Verify RAVPN internal address assignment
+  ansible.builtin.assert:
+    that:
+      - ra_address_assignment_readback.useInternalAddressPoolForIPv4 | bool
+      - not ra_address_assignment_readback.useAuthorizationServerForIPv4 | bool
+      - not ra_address_assignment_readback.useDHCP | bool
+
+- name: Get current RAVPN connection profiles
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+    register_as: ra_profile_summaries
+
+- name: Refuse unexpected RAVPN connection profiles
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_profile_summaries
+        | rejectattr('name', 'in', ra_resolved_profiles | map(attribute='name') | list)
+        | list | length == 0
+    fail_msg: >-
+      {{ ravpn.name }} has a connection profile outside ravpn.profiles.
+      Inspect the existing policy before this role changes it.
+
+- name: Ensure requested RAVPN connection profiles
+  ansible.builtin.include_tasks: present_profile.yml
+  loop: "{{ ra_resolved_profiles }}"
+  loop_control:
+    loop_var: ra_profile_request
+    label: "{{ ra_profile_request.name }}"
+
+- name: Read completed RAVPN connection profiles
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+    register_as: ra_profile_final
+
+- name: Require exactly the requested RAVPN profiles
+  ansible.builtin.assert:
+    that:
+      - ra_profile_final | length == ra_resolved_profiles | length
+      - >-
+        ra_profile_final | map(attribute='name') | sort
+        == ra_resolved_profiles | map(attribute='name') | sort

@@ -1,0 +1,94 @@
+---
+- name: Select existing RAVPN profile {{ ra_profile_request.name }}
+  ansible.builtin.set_fact:
+    ra_profile_matches: >-
+      {{ ra_profile_summaries
+         | selectattr('name', 'equalto', ra_profile_request.name) | list }}
+
+- name: Refuse duplicate RAVPN profile {{ ra_profile_request.name }}
+  ansible.builtin.assert:
+    that:
+      - ra_profile_matches | length <= 1
+
+- name: Set request for RAVPN profile {{ ra_profile_request.name }}
+  ansible.builtin.set_fact:
+    ra_profile_data: >-
+      {{ {
+           'name': ra_profile_request.name,
+           'type': 'RaVpnConnectionProfile',
+           'description': ra_marker,
+           'authenticationMethod': 'AAA_ONLY',
+           'useLocalAsPrimaryAuthServer':
+             ra_profile_request.authentication == 'local',
+           'enablePrimaryAuthFallbackToLocal': false,
+           'groupPolicy': {
+             'name': ra_group_readback.name,
+             'id': ra_group_readback.id,
+             'type': ra_group_readback.type},
+           'ipv4AddressPool': [{
+             'name': ra_pool_readback.name,
+             'id': ra_pool_readback.id,
+             'type': ra_pool_readback.type}],
+           'groupAlias': [{
+             'aliasName': ra_profile_request.alias,
+             'enabled': true}]
+         }
+         | combine(
+             {'primaryAuthenticationServer': {
+                'name': ra_profile_request.realm.name,
+                'id': ra_profile_request.realm.id,
+                'type': ra_profile_request.realm.type},
+              'authorizationServer': {
+                'name': ra_profile_request.realm.name,
+                'id': ra_profile_request.realm.id,
+                'type': ra_profile_request.realm.type},
+              'allowConnectionOnlyIfAuthorized': true,
+              'stripRealmFromUsername': true,
+              'stripGroupFromUsername': true}
+             if ra_profile_request.authentication == 'ad' else {}
+           ) }}
+
+- name: Create RAVPN profile {{ ra_profile_request.name }}
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDRAVpnConnectionProfileModel
+    data: "{{ ra_profile_data }}"
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+    register_as: ra_created_profile
+  when: ra_profile_matches | length == 0
+
+- name: Set RAVPN profile {{ ra_profile_request.name }}
+  ansible.builtin.set_fact:
+    ra_profile: >-
+      {{ ra_profile_matches[0] if ra_profile_matches | length == 1
+         else ra_created_profile }}
+
+- name: Read RAVPN profile {{ ra_profile_request.name }}
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_profile.id }}"
+    register_as: ra_profile_readback
+
+- name: Verify RAVPN profile {{ ra_profile_request.name }}
+  ansible.builtin.assert:
+    that:
+      - ra_profile_readback.name == ra_profile_request.name
+      - ra_profile_readback.description == ra_marker
+      - ra_profile_readback.authenticationMethod == 'AAA_ONLY'
+      - ra_profile_readback.useLocalAsPrimaryAuthServer | bool == (ra_profile_request.authentication == 'local')
+      - ra_profile_readback.groupPolicy.id == ra_group_readback.id
+      - ra_profile_readback.ipv4AddressPool[0].id == ra_pool_readback.id
+      - ra_profile_readback.groupAlias[0].aliasName == ra_profile_request.alias
+      - >-
+        ra_profile_request.authentication != 'ad' or
+        (ra_profile_readback.primaryAuthenticationServer.id
+         == ra_profile_request.realm.id and
+         ra_profile_readback.authorizationServer.id
+         == ra_profile_request.realm.id)
+    fail_msg: >-
+      Profile {{ ra_profile_request.name }} differs from the requested
+      authentication realm, group policy, pool, or alias.

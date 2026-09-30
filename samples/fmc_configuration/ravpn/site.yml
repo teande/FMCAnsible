@@ -1,0 +1,7 @@
+---
+- name: Configure one remote-access VPN
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  roles:
+    - role: cisco.fmcansible.ravpn

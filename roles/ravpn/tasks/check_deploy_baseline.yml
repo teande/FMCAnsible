@@ -1,0 +1,77 @@
+---
+- name: Get pending deployments before RAVPN changes
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeployableDevice
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_deployable_before
+
+- name: Require a clean RAVPN deployment baseline
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_deployable_before
+        | selectattr('device.id', 'equalto', ra_device.id)
+        | list | length == 0
+    fail_msg: >-
+      {{ ra_device.name }} has unrelated pending changes. Deploy or discard
+      those separately before setting ravpn.deploy=true.
+
+- name: Get RAVPN device license before changes
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDeviceLicense
+    query_params:
+      expanded: true
+    register_as: ra_device_licenses
+  when: ravpn.state | default('present') == 'present'
+
+- name: Select RAVPN target license before changes
+  ansible.builtin.set_fact:
+    ra_target_licenses: >-
+      {{ ra_device_licenses | selectattr('id', 'equalto', ra_device.id) | list }}
+  when: ravpn.state | default('present') == 'present'
+
+- name: Require Secure Client license before RAVPN changes
+  ansible.builtin.assert:
+    that:
+      - ra_target_licenses | length == 1
+      - "'SECURE_CLIENT_VPNOnly' in ra_target_licenses[0].licenseTypes | default([])"
+    fail_msg: >-
+      {{ ra_device.name }} needs a Secure Client VPN license before RAVPN
+      configuration and deployment.
+  when: ravpn.state | default('present') == 'present'
+
+- name: Get target FTD enrolled certificates before changes
+  cisco.fmcansible.fmc_configuration:
+    operation: getDeviceCertificateModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      filter: "deviceUUID:{{ ra_device.id }}"
+      expanded: true
+    register_as: ra_device_certificates
+  when: ravpn.state | default('present') == 'present'
+
+- name: Select target FTD enrolled certificate state
+  ansible.builtin.set_fact:
+    ra_target_certificates: >-
+      {{ ra_device_certificates
+         | selectattr('id', 'equalto', ra_device.id) | list }}
+  when: ravpn.state | default('present') == 'present'
+
+- name: Require RAVPN certificate enrolled before changes
+  ansible.builtin.assert:
+    that:
+      - ra_target_certificates | length == 1
+      - >-
+        ra_certificate_matches[0].id in
+        (ra_target_certificates[0].enrolledCertificates | default([]) | to_json)
+      - >-
+        'SUCCESS' in
+        (ra_target_certificates[0].enrolledCertificates | default([]) | to_json | upper)
+    fail_msg: >-
+      Enroll certificate {{ ravpn.certificate }} on {{ ra_device.name }} and
+      verify a successful trustpoint before deploying RAVPN.
+  when: ravpn.state | default('present') == 'present'

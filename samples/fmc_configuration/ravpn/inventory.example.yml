@@ -1,0 +1,11 @@
+---
+all:
+  hosts:
+    fmc:
+      ansible_host: "{{ lookup('env', 'FMCANSIBLE_FMC_HOST') }}"
+      ansible_network_os: cisco.fmcansible.fmc
+      ansible_user: "{{ lookup('env', 'FMCANSIBLE_FMC_USER') }}"
+      ansible_password: "{{ lookup('env', 'FMCANSIBLE_FMC_PASSWORD') }}"
+      ansible_httpapi_port: 443
+      ansible_httpapi_use_ssl: true
+      ansible_httpapi_validate_certs: true

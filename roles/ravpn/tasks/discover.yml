@@ -1,0 +1,286 @@
+---
+- name: Get FMC domains for RAVPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: ra_domains
+
+- name: Require an unambiguous RAVPN domain
+  ansible.builtin.assert:
+    that:
+      - ravpn.domain_uuid | default('') | length > 0 or ra_domains | length == 1
+    fail_msg: ravpn.domain_uuid is required when FMC has multiple domains.
+
+- name: Set RAVPN domain UUID
+  ansible.builtin.set_fact:
+    ra_domain_uuid: "{{ ravpn.domain_uuid | default(ra_domains[0].uuid, true) }}"
+
+- name: Get managed devices for RAVPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDevice
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    query_params:
+      expanded: true
+    register_as: ra_devices
+
+- name: Select RAVPN target device
+  ansible.builtin.set_fact:
+    ra_device_matches: >-
+      {{ (ra_devices | default([]))
+         | selectattr('name', 'equalto', ravpn.target_device) | list }}
+
+- name: Require a unique managed RAVPN target
+  ansible.builtin.assert:
+    that:
+      - ra_device_matches | length == 1
+    fail_msg: >-
+      ravpn.target_device must identify one FTD: {{ ravpn.target_device }}.
+
+- name: Read RAVPN target device
+  cisco.fmcansible.fmc_configuration:
+    operation: getDevice
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_device_matches[0].id }}"
+    register_as: ra_device
+
+- name: Require connected managed FTD on 7.3+
+  ansible.builtin.assert:
+    that:
+      - ra_device.managementState | default('') == 'MANAGED'
+      - ra_device.isConnected | default(false) | bool
+      - >-
+        (ra_device.sw_version | default('0.0')
+         | regex_search('[0-9]+[.][0-9]+([.][0-9]+)?'))
+        is version('7.3', '>=')
+    fail_msg: >-
+      {{ ravpn.target_device }} must be connected, managed, and run FTD 7.3+.
+      FMC reports {{ ra_device.sw_version | default('unknown') }}.
+
+- name: Get existing RAVPN address pools
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIPv4AddressPool
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_pool_name }}"
+    register_as: ra_pools
+
+- name: Get existing RAVPN group policies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllGroupPolicyModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_group_name }}"
+    register_as: ra_groups
+
+- name: Get existing RAVPN dynamic access policies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ra_dap_name }}"
+    register_as: ra_daps
+
+- name: Get existing RAVPN policies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    filters:
+      name: "{{ ravpn.name }}"
+    register_as: ra_policies
+
+- name: Select exact owned RAVPN resource names
+  ansible.builtin.set_fact:
+    ra_pool_matches: >-
+      {{ (ra_pools | default([]))
+         | selectattr('name', 'equalto', ra_pool_name) | list }}
+    ra_group_matches: >-
+      {{ (ra_groups | default([]))
+         | selectattr('name', 'equalto', ra_group_name) | list }}
+    ra_dap_matches: >-
+      {{ (ra_daps | default([]))
+         | selectattr('name', 'equalto', ra_dap_name) | list }}
+    ra_policy_matches: >-
+      {{ (ra_policies | default([]))
+         | selectattr('name', 'equalto', ravpn.name) | list }}
+
+- name: Refuse duplicate RAVPN resource names
+  ansible.builtin.assert:
+    that:
+      - ra_pool_matches | length <= 1
+      - ra_group_matches | length <= 1
+      - ra_dap_matches | length <= 1
+      - ra_policy_matches | length <= 1
+    fail_msg: Duplicate RAVPN names exist in FMC; resolve them before continuing.
+
+- name: Read existing RAVPN pool
+  cisco.fmcansible.fmc_configuration:
+    operation: getIPv4AddressPool
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_pool_matches[0].id }}"
+    register_as: ra_existing_pool
+  when: ra_pool_matches | length == 1
+
+- name: Read existing RAVPN group policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getGroupPolicyModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_group_matches[0].id }}"
+    register_as: ra_existing_group
+  when: ra_group_matches | length == 1
+
+- name: Read existing RAVPN DAP
+  cisco.fmcansible.fmc_configuration:
+    operation: getDynamicAccessPolicy
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_dap_matches[0].id }}"
+    register_as: ra_existing_dap
+  when: ra_dap_matches | length == 1
+
+- name: Read existing RAVPN policy
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_policy_matches[0].id }}"
+    register_as: ra_existing_policy
+  when: ra_policy_matches | length == 1
+
+- name: Refuse RAVPN resources without matching ownership marker
+  ansible.builtin.assert:
+    that:
+      - ra_pool_matches | length == 0 or ra_existing_pool.description | default('') == ra_marker
+      - ra_group_matches | length == 0 or ra_existing_group.description | default('') == ra_marker
+      - ra_dap_matches | length == 0 or ra_existing_dap.description | default('') == ra_marker
+      - ra_policy_matches | length == 0 or ra_existing_policy.description | default('') == ra_marker
+    fail_msg: >-
+      One or more existing resources derived from {{ ravpn.name }} are not
+      owned by this role. Nothing was changed; inspect FMC before retrying.
+
+- name: Read existing RAVPN connection profiles
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_existing_policy.id }}"
+    register_as: ra_existing_profiles
+  when: ra_policy_matches | length == 1
+
+- name: Read full existing RAVPN connection profiles
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnConnectionProfileModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_existing_policy.id }}"
+      objectId: "{{ ra_profile_summary.id }}"
+  register: ra_existing_profile_full
+  loop: "{{ ra_existing_profiles | default([]) }}"
+  loop_control:
+    loop_var: ra_profile_summary
+    label: "{{ ra_profile_summary.name }}"
+  when: ra_policy_matches | length == 1
+
+- name: Refuse RAVPN connection profiles without ownership marker
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_existing_profile_full.results | default([])
+        | map(attribute='response')
+        | rejectattr('description', 'equalto', ra_marker)
+        | list | length == 0
+    fail_msg: >-
+      {{ ravpn.name }} contains a connection profile not owned by this role.
+      Nothing was changed; inspect FMC before retrying.
+  when: ra_policy_matches | length == 1
+
+- name: Get RAVPN access zones
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllSecurityZoneObject
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_zones
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Get Secure Client packages
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllAnyConnectPackageModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_packages
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Get RAVPN IKEv2 policies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIkev2PolicyObject
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_ikev2_policies
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Get RAVPN certificate enrollments
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnCertEnrollmentModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_certificates
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Get RAVPN identity realms
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllRealm
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+    register_as: ra_realms
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Select RAVPN prerequisites
+  ansible.builtin.set_fact:
+    ra_zone_matches: >-
+      {{ ra_zones | selectattr('name', 'equalto', ravpn.access_zone) | list }}
+    ra_package_matches: >-
+      {{ ra_packages | selectattr('name', 'equalto', ravpn.secure_client.name) | list }}
+    ra_ikev2_matches: >-
+      {{ ra_ikev2_policies | selectattr('name', 'equalto', ravpn.ikev2_policy) | list }}
+    ra_certificate_matches: >-
+      {{ ra_certificates | selectattr('name', 'equalto', ravpn.certificate) | list }}
+    ra_resolved_profiles: []
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Require one of each RAVPN prerequisite
+  ansible.builtin.assert:
+    that:
+      - ra_zone_matches | length == 1
+      - ra_package_matches | length == 1
+      - ra_ikev2_matches | length == 1
+      - ra_certificate_matches | length == 1
+    fail_msg: >-
+      ravpn.access_zone, secure_client.name, ikev2_policy, and certificate
+      must each identify one existing FMC object. Check the exact names.
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Resolve RAVPN connection profiles
+  ansible.builtin.include_tasks: resolve_profile.yml
+  loop: "{{ ravpn.profiles }}"
+  loop_control:
+    loop_var: ra_input_profile
+    label: "{{ ra_input_profile.name | default('unnamed') }}"
+  when: ravpn.state | default('present') != 'absent'
+
+- name: Refuse unrequested profiles in an existing RAVPN policy
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_existing_profiles | default([])
+        | rejectattr('name', 'in', ra_resolved_profiles | map(attribute='name') | list)
+        | list | length == 0
+    fail_msg: >-
+      {{ ravpn.name }} has connection profiles outside ravpn.profiles.
+      Review them before modifying this policy.
+  when: ravpn.state | default('present') != 'absent'

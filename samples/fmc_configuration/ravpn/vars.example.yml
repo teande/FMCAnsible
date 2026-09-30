@@ -1,0 +1,30 @@
+---
+ravpn:
+  name: example-ravpn
+  target_device: example-ftd
+  state: inspect
+  deploy: false
+  access_zone: outside-zone
+  secure_client:
+    name: example-secure-client-package
+    os: WINDOWS
+  ikev2_policy: example-ikev2-policy
+  certificate: example-certificate-enrollment
+  pool:
+    range: 198.18.110.10-198.18.110.50
+    mask: 255.255.255.0
+  group_policy:
+    default_domain: example.invalid
+    banner: Authorized access only
+    simultaneous_logins: 2
+    vpn_idle_timeout: 30
+    mtu: 1406
+  profiles:
+    - name: ad
+      authentication: ad
+      realm: example-ad-realm
+      alias: corporate
+    - name: local
+      authentication: local
+      realm: example-local-realm
+      alias: emergency
