@@ -22,6 +22,8 @@
     path_params:
       domainUUID: "{{ fmcansible_domain_uuid }}"
       containerUUID: "{{ fmcansible_s2s_device_matches[0].id }}"
+    query_params:
+      expanded: true
     register_as: live_s2s_physical_interfaces
 
 - name: Select physical interface for S2S endpoint
