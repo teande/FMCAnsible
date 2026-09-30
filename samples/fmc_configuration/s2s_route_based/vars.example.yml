@@ -1,0 +1,31 @@
+---
+s2s_vpn:
+  mode: route_based
+  name: example-route-based
+  state: inspect
+  deploy: false
+  crypto:
+    ikev2_policy: AES-GCM-NULL-SHA-LATEST
+    ipsec_proposal: AES-GCM
+  hub:
+    device: hub-ftd
+    source_interface: outside
+    loopback:
+      id: 90
+      ifname: route-hub-lo
+      address: 169.254.90.1
+      netmask: 255.255.255.252
+    tunnel:
+      id: 90
+      ifname: route-hub-vti
+  spoke:
+    device: spoke-ftd
+    source_interface: outside
+    loopback:
+      id: 91
+      ifname: route-spoke-lo
+      address: 169.254.90.2
+      netmask: 255.255.255.252
+    tunnel:
+      id: 91
+      ifname: route-spoke-vti

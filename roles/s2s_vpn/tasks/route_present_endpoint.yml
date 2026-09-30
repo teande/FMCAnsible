@@ -1,0 +1,121 @@
+---
+- name: Select {{ route_resource.side }} route-based inputs
+  ansible.builtin.set_fact:
+    route_endpoint_input: "{{ route_vpn[route_resource.side] }}"
+
+- name: Create {{ route_resource.side }} borrowed-IP loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDLoopbackInterface
+    data:
+      type: LoopbackInterface
+      loopbackId: "{{ route_endpoint_input.loopback.id }}"
+      ifname: "{{ route_endpoint_input.loopback.ifname }}"
+      description: "{{ route_marker }}"
+      enabled: true
+      ipv4:
+        static:
+          address: "{{ route_endpoint_input.loopback.address }}"
+          netmask: "{{ route_endpoint_input.loopback.netmask }}"
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+    register_as: route_created_loopback
+  when: route_resource.loopback_matches | length == 0
+
+- name: Set {{ route_resource.side }} loopback
+  ansible.builtin.set_fact:
+    route_loopback: >-
+      {{ route_resource.loopback if route_resource.loopback_matches | length == 1
+         else route_created_loopback }}
+
+- name: Read {{ route_resource.side }} loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+      objectId: "{{ route_loopback.id }}"
+    register_as: route_loopback_readback
+
+- name: Verify {{ route_resource.side }} borrowed-IP loopback
+  ansible.builtin.assert:
+    that:
+      - route_loopback_readback.loopbackId == route_endpoint_input.loopback.id
+      - route_loopback_readback.ifname == route_endpoint_input.loopback.ifname
+      - route_loopback_readback.description == route_marker
+      - route_loopback_readback.enabled | bool
+      - route_loopback_readback.ipv4.static.address == route_endpoint_input.loopback.address
+      - route_loopback_readback.ipv4.static.netmask == route_endpoint_input.loopback.netmask
+    fail_msg: >-
+      {{ route_resource.side }} loopback on {{ route_resource.device.name }}
+      does not match s2s_vpn.{{ route_resource.side }}.loopback.
+
+- name: Create {{ route_resource.side }} static VTI borrowing loopback IP
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleFTDVTIInterface
+    data:
+      type: VTIInterface
+      tunnelSource: "{{ route_resource.source_interface }}"
+      tunnelType: STATIC
+      tunnelId: "{{ route_endpoint_input.tunnel.id }}"
+      ifname: "{{ route_endpoint_input.tunnel.ifname }}"
+      description: "{{ route_marker }}"
+      enabled: true
+      securityZone:
+        id: "{{ route_zone_readback.id }}"
+        name: "{{ route_zone_readback.name }}"
+        type: SecurityZone
+      ipAddressAssignmentType: BORROW_IP_FROM_INTERFACE
+      borrowIPfrom:
+        id: "{{ route_loopback_readback.id }}"
+        name: >-
+          {{ route_loopback_readback.name
+             | default(route_loopback_readback.ifname, true) }}
+        type: LoopbackInterface
+      ipsecMode: ipv4
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+    register_as: route_created_vti
+  when: route_resource.vti_matches | length == 0
+
+- name: Set {{ route_resource.side }} static VTI
+  ansible.builtin.set_fact:
+    route_vti: >-
+      {{ route_resource.vti if route_resource.vti_matches | length == 1
+         else route_created_vti }}
+
+- name: Read {{ route_resource.side }} static VTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+      objectId: "{{ route_vti.id }}"
+    register_as: route_vti_readback
+
+- name: Verify {{ route_resource.side }} borrowed-IP static VTI
+  ansible.builtin.assert:
+    that:
+      - route_vti_readback.tunnelType == 'STATIC'
+      - route_vti_readback.tunnelId == route_endpoint_input.tunnel.id
+      - route_vti_readback.ifname == route_endpoint_input.tunnel.ifname
+      - route_vti_readback.description == route_marker
+      - route_vti_readback.enabled | bool
+      - route_vti_readback.ipAddressAssignmentType == 'BORROW_IP_FROM_INTERFACE'
+      - route_vti_readback.borrowIPfrom.id == route_loopback_readback.id
+      - route_vti_readback.tunnelSource.id == route_resource.source_interface.id
+      - route_vti_readback.securityZone.id == route_zone_readback.id
+      - route_vti_readback.ipsecMode == 'ipv4'
+    fail_msg: >-
+      {{ route_resource.side }} VTI on {{ route_resource.device.name }}
+      does not match s2s_vpn.{{ route_resource.side }}.tunnel or its
+      borrowed loopback and source interface.
+
+- name: Store active {{ route_resource.side }} route-based endpoint
+  ansible.builtin.set_fact:
+    route_active_resources: >-
+      {{ route_active_resources + [route_resource | combine({
+          'loopback': route_loopback_readback,
+          'vti': route_vti_readback
+      })] }}

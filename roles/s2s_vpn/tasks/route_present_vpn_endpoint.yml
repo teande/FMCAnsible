@@ -1,0 +1,90 @@
+---
+- name: Select existing {{ route_resource.side }} VPN endpoint
+  ansible.builtin.set_fact:
+    route_endpoint_matches: >-
+      {{ (route_endpoint_summaries | default([]))
+         | selectattr('device.id', 'equalto', route_resource.device.id)
+         | list }}
+
+- name: Require at most one {{ route_resource.side }} VPN endpoint
+  ansible.builtin.assert:
+    that:
+      - route_endpoint_matches | length <= 1
+    fail_msg: >-
+      {{ route_vpn.name }} has duplicate endpoints for
+      {{ route_resource.device.name }}.
+
+- name: Create {{ route_resource.side }} route-based VPN endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: createVpnEndpoint
+    data:
+      peerType: PEER
+      device: "{{ route_resource.device }}"
+      interface:
+        id: "{{ route_resource.vti.id }}"
+        name: "{{ route_resource.vti.ifname }}"
+        type: VTI
+      tunnelSourceInterface: "{{ route_resource.source_interface_nameif }}"
+      sendTunnelInterfaceIpToPeer: true
+      allowIncomingIKEv2Routes: true
+      protectedNetworks: {}
+      connectionType: BIDIRECTIONAL
+      isLocalTunnelIdEnabled: false
+      type: EndPoint
+      overrideRemoteVpnFilter: false
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    register_as: route_created_endpoint
+  when: route_endpoint_matches | length == 0
+
+- name: Read {{ route_resource.side }} VPN endpoint list
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: route_endpoint_summaries
+
+- name: Select persisted {{ route_resource.side }} VPN endpoint
+  ansible.builtin.set_fact:
+    route_endpoint_matches: >-
+      {{ (route_endpoint_summaries | default([]))
+         | selectattr('device.id', 'equalto', route_resource.device.id)
+         | list }}
+
+- name: Require one persisted {{ route_resource.side }} VPN endpoint
+  ansible.builtin.assert:
+    that:
+      - route_endpoint_matches | length == 1
+    fail_msg: >-
+      Expected one {{ route_resource.side }} endpoint on
+      {{ route_resource.device.name }} after creation.
+
+- name: Read complete {{ route_resource.side }} VPN endpoint
+  cisco.fmcansible.fmc_configuration:
+    operation: getVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+      objectId: "{{ route_endpoint_matches[0].id }}"
+    register_as: route_endpoint_readback
+
+- name: Verify {{ route_resource.side }} route-based VPN endpoint
+  ansible.builtin.assert:
+    that:
+      - route_endpoint_readback.device.id == route_resource.device.id
+      - route_endpoint_readback.interface.id == route_resource.vti.id
+      - route_endpoint_readback.tunnelSourceInterface.id == route_resource.source_interface.id
+      - route_endpoint_readback.peerType == 'PEER'
+      - route_endpoint_readback.connectionType == 'BIDIRECTIONAL'
+      - route_endpoint_readback.sendTunnelInterfaceIpToPeer | bool
+      - route_endpoint_readback.allowIncomingIKEv2Routes | bool
+      - route_endpoint_readback.protectedNetworks | default({}) | length == 0
+      - not route_endpoint_readback.isLocalTunnelIdEnabled | bool
+      - not route_endpoint_readback.overrideRemoteVpnFilter | bool
+    fail_msg: >-
+      {{ route_resource.side }} endpoint in {{ route_vpn.name }} does not
+      match its static VTI or tunnel source on {{ route_resource.device.name }}.

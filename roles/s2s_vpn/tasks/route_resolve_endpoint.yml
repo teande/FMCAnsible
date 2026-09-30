@@ -1,0 +1,101 @@
+---
+- name: Select {{ route_side }} FTD
+  ansible.builtin.set_fact:
+    route_device_matches: >-
+      {{ (route_devices | default([]))
+         | selectattr('name', 'equalto', route_vpn[route_side].device) | list }}
+
+- name: Require one {{ route_side }} FTD
+  ansible.builtin.assert:
+    that:
+      - route_device_matches | length == 1
+    fail_msg: >-
+      s2s_vpn.{{ route_side }}.device must identify exactly one managed FTD:
+      {{ route_vpn[route_side].device }}.
+
+- name: Read {{ route_side }} FTD
+  cisco.fmcansible.fmc_configuration:
+    operation: getDevice
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_device_matches[0].id }}"
+    register_as: route_device_readback
+
+- name: Require connected managed {{ route_side }} FTD on 7.3+
+  ansible.builtin.assert:
+    that:
+      - route_device_readback.managementState | default('') == 'MANAGED'
+      - route_device_readback.isConnected | default(false) | bool
+      - >-
+        (route_device_readback.sw_version | default('0.0')
+         | regex_search('[0-9]+[.][0-9]+([.][0-9]+)?'))
+        is version('7.3', '>=')
+    fail_msg: >-
+      {{ route_vpn[route_side].device }} must be connected and managed,
+      running FTD 7.3+. FMC reports
+      {{ route_device_readback.sw_version | default('unknown') }}.
+
+- name: Get physical interfaces on {{ route_side }}
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_device_matches[0].id }}"
+    query_params:
+      expanded: true
+    register_as: route_physical_interfaces
+
+- name: Select {{ route_side }} tunnel source
+  ansible.builtin.set_fact:
+    route_source_matches: >-
+      {{ (((route_physical_interfaces | default([]))
+           | selectattr('name', 'equalto',
+                        route_vpn[route_side].source_interface) | list)
+          + ((route_physical_interfaces | default([]))
+             | selectattr('ifname', 'equalto',
+                          route_vpn[route_side].source_interface) | list))
+         | unique(attribute='id') | list }}
+
+- name: Require one {{ route_side }} tunnel source
+  ansible.builtin.assert:
+    that:
+      - route_source_matches | length == 1
+    fail_msg: >-
+      s2s_vpn.{{ route_side }}.source_interface must identify exactly one
+      physical interface on {{ route_vpn[route_side].device }}.
+
+- name: Read {{ route_side }} tunnel source
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDPhysicalInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_device_matches[0].id }}"
+      objectId: "{{ route_source_matches[0].id }}"
+    register_as: route_source_interface
+
+- name: Require enabled routed {{ route_side }} tunnel source
+  ansible.builtin.assert:
+    that:
+      - route_source_interface.enabled | default(false) | bool
+      - route_source_interface.ifname | default('') | length > 0
+      - route_source_interface.mode | default('NONE') == 'NONE'
+    fail_msg: >-
+      {{ route_vpn[route_side].device }} interface
+      {{ route_vpn[route_side].source_interface }} must be enabled, named,
+      and routed before configuring the tunnel.
+
+- name: Store resolved {{ route_side }} endpoint
+  ansible.builtin.set_fact:
+    "route_resolved_{{ route_side }}":
+      device:
+        id: "{{ route_device_matches[0].id }}"
+        name: "{{ route_device_matches[0].name }}"
+        type: Device
+      source_interface:
+        id: "{{ route_source_interface.id }}"
+        name: "{{ route_source_interface.name }}"
+        type: PhysicalInterface
+      source_interface_nameif:
+        id: "{{ route_source_interface.id }}"
+        name: "{{ route_source_interface.ifname }}"
+        type: PhysicalInterface

@@ -1,0 +1,130 @@
+---
+- name: Get route-based endpoints before topology removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_existing_topology.id }}"
+    query_params:
+      expanded: true
+    register_as: route_endpoints_for_removal
+  when: route_topology_matches | length == 1
+
+- name: Select owned VTI IDs before route-based removal
+  ansible.builtin.set_fact:
+    route_owned_vti_ids: >-
+      {{ route_existing_resources
+         | selectattr('vti.id', 'defined')
+         | map(attribute='vti.id') | list }}
+  when: route_topology_matches | length == 1
+
+- name: Refuse unexpected route-based endpoints before removal
+  ansible.builtin.assert:
+    that:
+      - route_endpoints_for_removal | length <= 2
+      - >-
+        route_endpoints_for_removal
+        | rejectattr('peerType', 'equalto', 'PEER')
+        | list | length == 0
+      - >-
+        route_endpoints_for_removal
+        | rejectattr('device.id', 'in',
+                     [route_resolved_hub.device.id,
+                      route_resolved_spoke.device.id])
+        | list | length == 0
+      - >-
+        route_endpoints_for_removal
+        | map(attribute='device.id') | unique | list | length
+        == route_endpoints_for_removal | length
+      - >-
+        route_endpoints_for_removal
+        | rejectattr('interface.id', 'in', route_owned_vti_ids)
+        | list | length == 0
+    fail_msg: >-
+      {{ route_vpn.name }} has unexpected, duplicate, or repointed endpoints.
+      Review the topology before this role deletes it.
+  when: route_topology_matches | length == 1
+
+- name: Delete route-based VPN endpoints
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_existing_topology.id }}"
+      objectId: "{{ route_endpoint_for_removal.id }}"
+  loop: "{{ route_endpoints_for_removal | default([]) }}"
+  loop_control:
+    loop_var: route_endpoint_for_removal
+    label: "{{ route_endpoint_for_removal.device.name | default(route_endpoint_for_removal.id) }}"
+  when: route_topology_matches | length == 1
+
+- name: Read route-based VPN endpoints after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_existing_topology.id }}"
+    register_as: route_endpoints_after_removal
+  when: route_topology_matches | length == 1
+
+- name: Require no remaining route-based VPN endpoints
+  ansible.builtin.assert:
+    that:
+      - route_endpoints_after_removal | length == 0
+    fail_msg: >-
+      {{ route_vpn.name }} still has endpoints and cannot be safely removed.
+  when: route_topology_matches | length == 1
+
+- name: Delete owned point-to-point topology
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_existing_topology.id }}"
+  when: route_topology_matches | length == 1
+
+- name: Delete owned static VTIs and loopbacks
+  ansible.builtin.include_tasks: route_absent_endpoint.yml
+  loop: "{{ route_existing_resources }}"
+  loop_control:
+    loop_var: route_resource
+    label: "{{ route_resource.side }}: {{ route_resource.device.name }}"
+
+- name: Delete owned route-based VTI security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteSecurityZoneObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_existing_zone.id }}"
+  when: route_zone_matches | length == 1
+
+- name: Read route-based topologies after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    filters:
+      name: "{{ route_vpn.name }}"
+    register_as: route_topologies_after_removal
+
+- name: Read route-based zones after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllSecurityZoneObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_zones_after_removal
+
+- name: Verify route-based topology and zone removal
+  ansible.builtin.assert:
+    that:
+      - >-
+        (route_topologies_after_removal | default([]))
+        | selectattr('name', 'equalto', route_vpn.name)
+        | list | length == 0
+      - >-
+        (route_zones_after_removal | default([]))
+        | selectattr('name', 'equalto', route_zone_name)
+        | list | length == 0
+    fail_msg: >-
+      {{ route_vpn.name }} topology or {{ route_zone_name }} zone remains
+      after deletion.

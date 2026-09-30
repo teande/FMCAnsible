@@ -1,0 +1,108 @@
+---
+- name: Select resolved {{ route_side }} endpoint
+  ansible.builtin.set_fact:
+    route_resolved: >-
+      {{ route_resolved_hub if route_side == 'hub' else route_resolved_spoke }}
+
+- name: Get {{ route_side }} loopbacks
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resolved.device.id }}"
+    query_params:
+      expanded: true
+    register_as: route_loopbacks
+
+- name: Get {{ route_side }} VTIs
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resolved.device.id }}"
+    query_params:
+      expanded: true
+    register_as: route_vtis
+
+- name: Select exact {{ route_side }} interfaces
+  ansible.builtin.set_fact:
+    route_loopback_matches: >-
+      {{ (route_loopbacks | default([]))
+         | selectattr('ifname', 'equalto', route_vpn[route_side].loopback.ifname)
+         | list }}
+    route_loopback_id_matches: >-
+      {{ (route_loopbacks | default([]))
+         | selectattr('loopbackId', 'equalto', route_vpn[route_side].loopback.id)
+         | list }}
+    route_vti_matches: >-
+      {{ (route_vtis | default([]))
+         | selectattr('ifname', 'equalto', route_vpn[route_side].tunnel.ifname)
+         | list }}
+    route_vti_id_matches: >-
+      {{ (route_vtis | default([]))
+         | selectattr('tunnelId', 'equalto', route_vpn[route_side].tunnel.id)
+         | list }}
+
+- name: Refuse ambiguous {{ route_side }} interface names and IDs
+  ansible.builtin.assert:
+    that:
+      - route_loopback_matches | length <= 1
+      - route_loopback_id_matches | length <= 1
+      - route_vti_matches | length <= 1
+      - route_vti_id_matches | length <= 1
+      - >-
+        route_loopback_id_matches | length == 0 or
+        route_loopback_id_matches[0].ifname == route_vpn[route_side].loopback.ifname
+      - >-
+        route_vti_id_matches | length == 0 or
+        route_vti_id_matches[0].ifname == route_vpn[route_side].tunnel.ifname
+    fail_msg: >-
+      {{ route_side }} loopback or tunnel name/ID is duplicated or already
+      assigned on {{ route_resolved.device.name }}.
+
+- name: Read matching {{ route_side }} loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resolved.device.id }}"
+      objectId: "{{ route_loopback_matches[0].id }}"
+    register_as: route_existing_loopback
+  when: route_loopback_matches | length == 1
+
+- name: Read matching {{ route_side }} VTI
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDVTIInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resolved.device.id }}"
+      objectId: "{{ route_vti_matches[0].id }}"
+    register_as: route_existing_vti
+  when: route_vti_matches | length == 1
+
+- name: Refuse unowned {{ route_side }} interfaces
+  ansible.builtin.assert:
+    that:
+      - >-
+        route_loopback_matches | length == 0 or
+        route_existing_loopback.description | default('') == route_marker
+      - >-
+        route_vti_matches | length == 0 or
+        route_existing_vti.description | default('') == route_marker
+    fail_msg: >-
+      Existing {{ route_side }} loopback or VTI is not owned by
+      {{ route_vpn.name }}. Nothing was replaced.
+
+- name: Store discovered {{ route_side }} resources
+  ansible.builtin.set_fact:
+    route_existing_resources: >-
+      {{ route_existing_resources + [{
+          'side': route_side,
+          'device': route_resolved.device,
+          'source_interface': route_resolved.source_interface,
+          'source_interface_nameif': route_resolved.source_interface_nameif,
+          'loopback_matches': route_loopback_matches,
+          'vti_matches': route_vti_matches,
+          'loopback': (route_existing_loopback if route_loopback_matches | length == 1 else {}),
+          'vti': (route_existing_vti if route_vti_matches | length == 1 else {})
+      }] }}

@@ -1,0 +1,302 @@
+---
+- name: Get existing IKEv2 policies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIkev2PolicyObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_ikev2_policies
+
+- name: Get existing IKEv2 IPsec proposals
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllIKEv2IPsecProposal
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_ipsec_proposals
+
+- name: Select exact route-based crypto objects
+  ansible.builtin.set_fact:
+    route_ikev2_matches: >-
+      {{ (route_ikev2_policies | default([]))
+         | selectattr('name', 'equalto', route_vpn.crypto.ikev2_policy)
+         | list }}
+    route_ipsec_matches: >-
+      {{ (route_ipsec_proposals | default([]))
+         | selectattr('name', 'equalto', route_vpn.crypto.ipsec_proposal)
+         | list }}
+
+- name: Require one of each route-based crypto object
+  ansible.builtin.assert:
+    that:
+      - route_ikev2_matches | length == 1
+      - route_ipsec_matches | length == 1
+    fail_msg: >-
+      s2s_vpn.crypto must name one existing IKEv2 policy and one existing
+      IKEv2 IPsec proposal. Found {{ route_ikev2_matches | length }} policy
+      and {{ route_ipsec_matches | length }} proposal matches.
+
+- name: Create route-based VTI security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: createMultipleSecurityZoneObject
+    data:
+      - name: "{{ route_zone_name }}"
+        type: SecurityZone
+        description: "{{ route_marker }}"
+        interfaceMode: ROUTED
+        interfaces: []
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    query_params:
+      bulk: true
+    register_as: route_created_zones
+  when: route_zone_matches | length == 0
+
+- name: Set route-based VTI security zone
+  ansible.builtin.set_fact:
+    route_zone: >-
+      {{ route_existing_zone if route_zone_matches | length == 1
+         else route_created_zones[0] }}
+
+- name: Read route-based VTI security zone
+  cisco.fmcansible.fmc_configuration:
+    operation: getSecurityZoneObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_zone.id }}"
+    register_as: route_zone_readback
+
+- name: Verify route-based VTI security zone
+  ansible.builtin.assert:
+    that:
+      - route_zone_readback.name == route_zone_name
+      - route_zone_readback.description | default('') in ['', route_marker]
+      - route_zone_readback.interfaceMode == 'ROUTED'
+    fail_msg: >-
+      Security zone {{ route_zone_name }} is not the routed zone reserved
+      for {{ route_vpn.name }}.
+
+- name: Initialize active route-based endpoint resources
+  ansible.builtin.set_fact:
+    route_active_resources: []
+
+- name: Ensure borrowed-IP loopbacks and static VTIs
+  ansible.builtin.include_tasks: route_present_endpoint.yml
+  loop: "{{ route_existing_resources }}"
+  loop_control:
+    loop_var: route_resource
+    label: "{{ route_resource.side }}: {{ route_resource.device.name }}"
+
+- name: Create point-to-point route-based topology
+  cisco.fmcansible.fmc_configuration:
+    operation: createFTDS2SVpnModel
+    data:
+      name: "{{ route_vpn.name }}"
+      type: FTDS2SVpn
+      description: "{{ route_marker }}"
+      topologyType: POINT_TO_POINT
+      routeBased: true
+      ikeV1Enabled: false
+      ikeV2Enabled: true
+      enableEcmpAtHub: false
+      enableEcmpAtSpoke: false
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_created_topology
+  when: route_topology_matches | length == 0
+
+- name: Set point-to-point route-based topology
+  ansible.builtin.set_fact:
+    route_topology: >-
+      {{ route_existing_topology if route_topology_matches | length == 1
+         else route_created_topology }}
+
+- name: Read point-to-point route-based topology
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_topology.id }}"
+    register_as: route_topology_readback
+
+- name: Verify point-to-point route-based topology
+  ansible.builtin.assert:
+    that:
+      - route_topology_readback.name == route_vpn.name
+      - route_topology_readback.description == route_marker
+      - route_topology_readback.topologyType == 'POINT_TO_POINT'
+      - route_topology_readback.routeBased | bool
+      - not route_topology_readback.ikeV1Enabled | bool
+      - route_topology_readback.ikeV2Enabled | bool
+    fail_msg: >-
+      Topology {{ route_vpn.name }} differs from the requested IKEv2
+      point-to-point route-based VPN.
+
+- name: Get route-based IKE settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnIkeSettings
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: route_ike_settings
+
+- name: Get route-based IPsec settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnIPSecSettings
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: route_ipsec_settings
+
+- name: Require one IKE and one IPsec settings object
+  ansible.builtin.assert:
+    that:
+      - route_ike_settings | length == 1
+      - route_ipsec_settings | length == 1
+    fail_msg: >-
+      Expected exactly one IKE and one IPsec settings object for
+      {{ route_vpn.name }}.
+
+- name: Update route-based IKE settings when needed
+  cisco.fmcansible.fmc_configuration:
+    operation: updateVpnIkeSettings
+    data:
+      id: "{{ route_ike_settings[0].id }}"
+      type: IkeSettings
+      ikeV2Settings:
+        automaticPreSharedKeyLength: 32
+        enforceHexBasedPreSharedKeyOnly: false
+        authenticationType: AUTOMATIC_PRE_SHARED_KEY
+        policies:
+          - name: "{{ route_ikev2_matches[0].name }}"
+            id: "{{ route_ikev2_matches[0].id }}"
+            type: "{{ route_ikev2_matches[0].type }}"
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+      objectId: "{{ route_ike_settings[0].id }}"
+  when: >-
+    route_ike_settings[0].ikeV2Settings.authenticationType | default('')
+    != 'AUTOMATIC_PRE_SHARED_KEY' or
+    route_ike_settings[0].ikeV2Settings.policies | default([])
+    | map(attribute='id') | list != [route_ikev2_matches[0].id]
+
+- name: Update route-based IPsec settings when needed
+  cisco.fmcansible.fmc_configuration:
+    operation: updateVpnIPSecSettings
+    data:
+      id: "{{ route_ipsec_settings[0].id }}"
+      type: IPSecSettings
+      cryptoMapType: STATIC
+      ikeV2Mode: TUNNEL
+      enableSaStrengthEnforcement: >-
+        {{ route_ipsec_settings[0].enableSaStrengthEnforcement | default(false) }}
+      enableRRI: false
+      lifetimeSeconds: "{{ route_ipsec_settings[0].lifetimeSeconds }}"
+      lifetimeKilobytes: "{{ route_ipsec_settings[0].lifetimeKilobytes }}"
+      perfectForwardSecrecy: "{{ route_ipsec_settings[0].perfectForwardSecrecy }}"
+      validateIncomingIcmpErrorMessage: >-
+        {{ route_ipsec_settings[0].validateIncomingIcmpErrorMessage | default(false) }}
+      doNotFragmentPolicy: "{{ route_ipsec_settings[0].doNotFragmentPolicy }}"
+      tfcPackets: "{{ route_ipsec_settings[0].tfcPackets }}"
+      ikeV2IpsecProposal:
+        - name: "{{ route_ipsec_matches[0].name }}"
+          id: "{{ route_ipsec_matches[0].id }}"
+          type: "{{ route_ipsec_matches[0].type }}"
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+      objectId: "{{ route_ipsec_settings[0].id }}"
+  when: >-
+    route_ipsec_settings[0].cryptoMapType | default('') != 'STATIC' or
+    route_ipsec_settings[0].ikeV2Mode | default('') != 'TUNNEL' or
+    route_ipsec_settings[0].enableRRI | default(false) | bool or
+    route_ipsec_settings[0].ikeV2IpsecProposal | default([])
+    | map(attribute='id') | list != [route_ipsec_matches[0].id]
+
+- name: Read configured route-based IKE settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getVpnIkeSettings
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+      objectId: "{{ route_ike_settings[0].id }}"
+    register_as: route_ike_readback
+
+- name: Read configured route-based IPsec settings
+  cisco.fmcansible.fmc_configuration:
+    operation: getVpnIPSecSettings
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+      objectId: "{{ route_ipsec_settings[0].id }}"
+    register_as: route_ipsec_readback
+
+- name: Verify route-based IKE and IPsec settings
+  ansible.builtin.assert:
+    that:
+      - route_ike_readback.ikeV2Settings.authenticationType == 'AUTOMATIC_PRE_SHARED_KEY'
+      - route_ike_readback.ikeV2Settings.policies | map(attribute='id') | list == [route_ikev2_matches[0].id]
+      - route_ipsec_readback.cryptoMapType == 'STATIC'
+      - route_ipsec_readback.ikeV2Mode == 'TUNNEL'
+      - not route_ipsec_readback.enableRRI | bool
+      - route_ipsec_readback.ikeV2IpsecProposal | map(attribute='id') | list == [route_ipsec_matches[0].id]
+    fail_msg: >-
+      IKE or IPsec settings on {{ route_vpn.name }} do not match
+      s2s_vpn.crypto and the route-based tunnel requirements.
+
+- name: Get existing route-based VPN endpoints
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: route_endpoint_summaries
+
+- name: Refuse unexpected route-based VPN endpoints
+  ansible.builtin.assert:
+    that:
+      - route_endpoint_summaries | length <= 2
+      - >-
+        route_endpoint_summaries
+        | rejectattr('device.id', 'in',
+                     [route_resolved_hub.device.id,
+                      route_resolved_spoke.device.id])
+        | list | length == 0
+    fail_msg: >-
+      {{ route_vpn.name }} has an endpoint outside its selected hub and
+      spoke. Review the existing topology before changing it.
+
+- name: Ensure and read back both route-based VPN endpoints
+  ansible.builtin.include_tasks: route_present_vpn_endpoint.yml
+  loop: "{{ route_active_resources }}"
+  loop_control:
+    loop_var: route_resource
+    label: "{{ route_resource.side }}: {{ route_resource.device.name }}"
+
+- name: Read completed route-based VPN endpoints
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllVpnEndpoint
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_topology_readback.id }}"
+    query_params:
+      expanded: true
+    register_as: route_endpoint_final
+
+- name: Require exactly the requested route-based endpoints
+  ansible.builtin.assert:
+    that:
+      - route_endpoint_final | length == 2
+      - route_endpoint_final | map(attribute='device.id') | unique | list | length == 2
+      - >-
+        route_endpoint_final | map(attribute='device.id') | sort
+        == [route_resolved_hub.device.id,
+            route_resolved_spoke.device.id] | sort
+    fail_msg: >-
+      {{ route_vpn.name }} must have exactly one verified endpoint on each
+      selected device.

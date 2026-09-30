@@ -1,83 +1,17 @@
 ---
-- name: Require an S2S VPN input mapping
+- name: Validate S2S VPN mode
   ansible.builtin.assert:
     that:
       - s2s_vpn is defined
       - s2s_vpn is mapping
-      - s2s_vpn.mode | default('sdwan') == 'sdwan'
+      - s2s_vpn.mode | default('sdwan') in ['sdwan', 'route_based']
     fail_msg: >-
-      Pass one s2s_vpn mapping with mode=sdwan. Other S2S modes are not
-      implemented by this role yet.
+      Pass one s2s_vpn mapping with mode=sdwan or mode=route_based.
 
-- name: Set SD-WAN role input
-  ansible.builtin.set_fact:
-    sdwan_vpn: "{{ s2s_vpn }}"
+- name: Configure SD-WAN site-to-site VPN
+  ansible.builtin.include_tasks: sdwan.yml
+  when: s2s_vpn.mode | default('sdwan') == 'sdwan'
 
-- name: Validate topology identity
-  ansible.builtin.assert:
-    that:
-      - sdwan_vpn.name | default('') | length > 0
-      - sdwan_vpn.state | default('present') in ['inspect', 'present', 'absent']
-    fail_msg: >-
-      s2s_vpn.name is required and s2s_vpn.state must be inspect, present,
-      or absent.
-
-- name: Validate hub and spoke device selection
-  ansible.builtin.assert:
-    that:
-      - sdwan_vpn.hub.device | default('') | length > 0
-      - sdwan_vpn.spoke.device | default('') | length > 0
-      - sdwan_vpn.hub.device != sdwan_vpn.spoke.device
-      - sdwan_vpn.hub.source_interface | default('') | length > 0
-      - sdwan_vpn.spoke.source_interface | default('') | length > 0
-    fail_msg: >-
-      s2s_vpn.hub and s2s_vpn.spoke need different device names and each
-      needs a source_interface configured as a routed physical interface.
-
-- name: Validate spoke tunnel pool
-  ansible.builtin.assert:
-    that:
-      - sdwan_vpn.spoke_pool.name | default('') | length > 0
-      - sdwan_vpn.spoke_pool.range | default('') is match('^[0-9.]+-[0-9.]+$')
-      - (sdwan_vpn.spoke_pool.mask | default('') | ansible.utils.ipaddr('netmask')) is string
-    fail_msg: >-
-      s2s_vpn.spoke_pool requires name, range (start-end), and a valid mask.
-
-- name: Validate hub loopback and tunnel
-  ansible.builtin.assert:
-    that:
-      - sdwan_vpn.hub.loopback.ifname | default('') | length > 0
-      - sdwan_vpn.hub.tunnel.ifname | default('') | length > 0
-      - sdwan_vpn.hub.loopback.id | default(-1) | int >= 0
-      - sdwan_vpn.hub.tunnel.id | default(-1) | int >= 0
-      - (sdwan_vpn.hub.loopback.address | default('') | ansible.utils.ipaddr('address')) is string
-      - (sdwan_vpn.hub.loopback.netmask | default('') | ansible.utils.ipaddr('netmask')) is string
-    fail_msg: >-
-      s2s_vpn.hub.loopback needs id, ifname, address and netmask;
-      s2s_vpn.hub.tunnel needs id and ifname.
-
-- name: Set SD-WAN resource identity
-  ansible.builtin.set_fact:
-    sdwan_marker: "Managed by FMCAnsible s2s_vpn: {{ sdwan_vpn.name }}"
-    sdwan_zone_name: "{{ sdwan_vpn.name }}-zone"
-
-- name: Discover SD-WAN resources
-  ansible.builtin.include_tasks: discover.yml
-
-- name: Check deployment baseline when requested
-  ansible.builtin.include_tasks: check_deploy_baseline.yml
-  when: sdwan_vpn.deploy | default(false) | bool
-
-- name: Ensure SD-WAN VPN is present
-  ansible.builtin.include_tasks: present.yml
-  when: sdwan_vpn.state | default('present') == 'present'
-
-- name: Ensure SD-WAN VPN is absent
-  ansible.builtin.include_tasks: absent.yml
-  when: sdwan_vpn.state | default('present') == 'absent'
-
-- name: Deploy SD-WAN change when requested
-  ansible.builtin.include_tasks: deploy.yml
-  when:
-    - sdwan_vpn.state | default('present') != 'inspect'
-    - sdwan_vpn.deploy | default(false) | bool
+- name: Configure manual route-based site-to-site VPN
+  ansible.builtin.include_tasks: route_based.yml
+  when: s2s_vpn.mode | default('sdwan') == 'route_based'

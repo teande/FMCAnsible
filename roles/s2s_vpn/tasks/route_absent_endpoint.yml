@@ -1,0 +1,55 @@
+---
+- name: Delete owned {{ route_resource.side }} static VTI
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDVTIInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+      objectId: "{{ route_resource.vti.id }}"
+  when: route_resource.vti_matches | length == 1
+
+- name: Delete owned {{ route_resource.side }} loopback
+  cisco.fmcansible.fmc_configuration:
+    operation: deleteFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+      objectId: "{{ route_resource.loopback.id }}"
+  when: route_resource.loopback_matches | length == 1
+
+- name: Read {{ route_resource.side }} loopbacks after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDLoopbackInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+    query_params:
+      expanded: true
+    register_as: route_loopbacks_after_removal
+
+- name: Read {{ route_resource.side }} VTIs after removal
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDVTIInterface
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      containerUUID: "{{ route_resource.device.id }}"
+    query_params:
+      expanded: true
+    register_as: route_vtis_after_removal
+
+- name: Verify {{ route_resource.side }} interface removal
+  ansible.builtin.assert:
+    that:
+      - >-
+        (route_loopbacks_after_removal | default([]))
+        | selectattr('ifname', 'equalto',
+                     route_vpn[route_resource.side].loopback.ifname)
+        | list | length == 0
+      - >-
+        (route_vtis_after_removal | default([]))
+        | selectattr('ifname', 'equalto',
+                     route_vpn[route_resource.side].tunnel.ifname)
+        | list | length == 0
+    fail_msg: >-
+      {{ route_resource.side }} loopback or VTI still exists on
+      {{ route_resource.device.name }} after deletion.

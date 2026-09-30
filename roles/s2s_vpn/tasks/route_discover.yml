@@ -1,0 +1,116 @@
+---
+- name: Get FMC domains for route-based VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDomain
+    register_as: route_domains
+
+- name: Require an unambiguous route-based FMC domain
+  ansible.builtin.assert:
+    that:
+      - >-
+        (route_vpn.domain_uuid | default('') | length > 0) or
+        (route_domains | length == 1)
+    fail_msg: >-
+      s2s_vpn.domain_uuid is required when FMC has more than one domain.
+
+- name: Set route-based FMC domain UUID
+  ansible.builtin.set_fact:
+    route_domain_uuid: >-
+      {{ route_vpn.domain_uuid | default(route_domains[0].uuid, true) }}
+
+- name: Get managed FTDs for route-based VPN
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllDevice
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_devices
+
+- name: Resolve route-based hub and spoke
+  ansible.builtin.include_tasks: route_resolve_endpoint.yml
+  loop:
+    - hub
+    - spoke
+  loop_control:
+    loop_var: route_side
+
+- name: Get route-based security zones
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllSecurityZoneObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    register_as: route_zones
+
+- name: Get route-based S2S topologies
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+    filters:
+      name: "{{ route_vpn.name }}"
+    register_as: route_topologies
+
+- name: Select exact route-based zone and topology
+  ansible.builtin.set_fact:
+    route_zone_matches: >-
+      {{ (route_zones | default([]))
+         | selectattr('name', 'equalto', route_zone_name) | list }}
+    route_topology_matches: >-
+      {{ (route_topologies | default([]))
+         | selectattr('name', 'equalto', route_vpn.name) | list }}
+
+- name: Refuse ambiguous route-based zone or topology
+  ansible.builtin.assert:
+    that:
+      - route_zone_matches | length <= 1
+      - route_topology_matches | length <= 1
+    fail_msg: >-
+      More than one zone or topology matches s2s_vpn.name. Resolve the
+      duplicate in FMC before this role changes anything.
+
+- name: Read matching route-based zone
+  cisco.fmcansible.fmc_configuration:
+    operation: getSecurityZoneObject
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_zone_matches[0].id }}"
+    register_as: route_existing_zone
+  when: route_zone_matches | length == 1
+
+- name: Read matching route-based topology
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDS2SVpnModel
+    path_params:
+      domainUUID: "{{ route_domain_uuid }}"
+      objectId: "{{ route_topology_matches[0].id }}"
+    register_as: route_existing_topology
+  when: route_topology_matches | length == 1
+
+- name: Refuse unowned route-based zone or topology
+  ansible.builtin.assert:
+    that:
+      - >-
+        route_zone_matches | length == 0 or
+        (route_existing_zone.name == route_zone_name and
+         route_existing_zone.interfaceMode == 'ROUTED' and
+         route_existing_zone.description | default('') in ['', route_marker])
+      - >-
+        route_topology_matches | length == 0 or
+        (route_existing_topology.description | default('') == route_marker and
+         route_existing_topology.topologyType == 'POINT_TO_POINT' and
+         route_existing_topology.routeBased | bool)
+    fail_msg: >-
+      Existing {{ route_vpn.name }} topology or {{ route_zone_name }} zone
+      is not owned by this route-based role. cdFMC may omit zone descriptions;
+      reserve the exact derived zone name for this role.
+
+- name: Initialize route-based endpoint resources
+  ansible.builtin.set_fact:
+    route_existing_resources: []
+
+- name: Discover each route-based endpoint interface
+  ansible.builtin.include_tasks: route_discover_endpoint.yml
+  loop:
+    - hub
+    - spoke
+  loop_control:
+    loop_var: route_side

@@ -210,15 +210,15 @@ cdFMC release.
 
 Sample playbooks are located [`here`](https://github.com/CiscoDevNet/FMCAnsible/tree/main/samples).
 
-### SD-WAN site-to-site VPN role (unreleased)
+### Site-to-site VPN role (unreleased)
 
 The `s2s_vpn` role is currently available on the `feature/vpn-roles` branch,
-not in the published 1.1.1 Galaxy collection. It configures one SD-WAN
-site-to-site VPN per playbook invocation on FTD 7.3 or later. See the
-[role usage example](roles/s2s_vpn/README.md) for its inputs and the
-[runnable sample](samples/fmc_configuration/s2s_sdwan/README.md) for inventory,
-discovery, and playbook commands. Manual route-based, policy-based, and RAVPN
-roles are not implemented yet.
+not in the published 1.1.1 Galaxy collection. It configures one site-to-site
+VPN per playbook invocation on FTD 7.3 or later. See the
+[role usage examples](roles/s2s_vpn/README.md), the
+[SD-WAN sample](samples/fmc_configuration/s2s_sdwan/README.md), and the
+[manual route-based sample](samples/fmc_configuration/s2s_route_based/README.md).
+Policy-based S2S and RAVPN are not implemented yet.
 
 ## Contributing to this collection
 

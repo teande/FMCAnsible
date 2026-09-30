@@ -1,0 +1,7 @@
+---
+- name: Configure one manual route-based site-to-site VPN
+  hosts: all
+  connection: httpapi
+  gather_facts: false
+  roles:
+    - role: cisco.fmcansible.s2s_vpn

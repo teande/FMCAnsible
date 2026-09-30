@@ -1,35 +1,34 @@
 ---
-- name: Get deployable devices after SD-WAN change
+- name: Get deployable devices after S2S changes
   cisco.fmcansible.fmc_configuration:
     operation: getDeployableDevice
     path_params:
-      domainUUID: "{{ sdwan_domain_uuid }}"
+      domainUUID: "{{ s2s_domain_uuid }}"
     query_params:
       expanded: true
-    register_as: sdwan_deployable_after
+    register_as: s2s_deployable_after
 
 - name: Select hub and spoke deployment targets
   ansible.builtin.set_fact:
-    sdwan_deployment_targets: >-
-      {{ (sdwan_deployable_after | default([]))
+    s2s_deployment_targets: >-
+      {{ (s2s_deployable_after | default([]))
          | selectattr('device.id', 'in',
-                      [sdwan_resolved_hub.device.id,
-                       sdwan_resolved_spoke.device.id]) | list }}
+                      [s2s_hub_device.id, s2s_spoke_device.id]) | list }}
 
 - name: Require deployment targets are ready
   ansible.builtin.assert:
     that:
       - >-
-        sdwan_deployment_targets
+        s2s_deployment_targets
         | rejectattr('canBeDeployed', 'equalto', true) | list | length == 0
       - >-
-        sdwan_deployment_targets
+        s2s_deployment_targets
         | selectattr('isDeploying', 'equalto', true) | list | length == 0
     fail_msg: >-
       The hub or spoke has pending changes but cannot currently be deployed.
       Check FMC deployment readiness for both selected devices.
 
-- name: Submit SD-WAN deployment
+- name: Submit S2S deployment
   cisco.fmcansible.fmc_configuration:
     operation: createDeploymentRequest
     data:
@@ -38,40 +37,40 @@
       forceDeploy: false
       ignoreWarning: false
       deploymentNote: >-
-        {{ sdwan_vpn.state | default('present') }} {{ sdwan_vpn.name }}
+        {{ s2s_vpn.state | default('present') }} {{ s2s_vpn.name }}
       deviceList: >-
-        {{ sdwan_deployment_targets | map(attribute='device.id') | list }}
+        {{ s2s_deployment_targets | map(attribute='device.id') | list }}
     path_params:
-      domainUUID: "{{ sdwan_domain_uuid }}"
-  register: sdwan_deployment_request
-  when: sdwan_deployment_targets | length > 0
+      domainUUID: "{{ s2s_domain_uuid }}"
+  register: s2s_deployment_request
+  when: s2s_deployment_targets | length > 0
 
-- name: Wait for SD-WAN deployment task
+- name: Wait for S2S deployment task
   cisco.fmcansible.fmc_configuration:
     operation: getTaskStatus
     path_params:
-      domainUUID: "{{ sdwan_domain_uuid }}"
-      objectId: "{{ sdwan_deployment_request.response.metadata.task.id }}"
+      domainUUID: "{{ s2s_domain_uuid }}"
+      objectId: "{{ s2s_deployment_request.response.metadata.task.id }}"
     query_params:
       showDetailedDeviceStatus: true
-  register: sdwan_deployment_status
+  register: s2s_deployment_status
   until: >-
-    sdwan_deployment_status.response.status | default('') | upper
+    s2s_deployment_status.response.status | default('') | upper
     in ['COMPLETED', 'DEPLOYED', 'FAILED']
   retries: 80
   delay: 15
-  when: sdwan_deployment_targets | length > 0
+  when: s2s_deployment_targets | length > 0
 
-- name: Require successful SD-WAN deployment
+- name: Require successful S2S deployment
   ansible.builtin.assert:
     that:
       - >-
-        sdwan_deployment_status.response.status | upper
+        s2s_deployment_status.response.status | upper
         in ['COMPLETED', 'DEPLOYED']
       - >-
-        sdwan_deployment_status.response.subTasks | default([])
+        s2s_deployment_status.response.subTasks | default([])
         | rejectattr('status', 'equalto', 'SUCCEEDED') | list | length == 0
     fail_msg: >-
-      SD-WAN deployment failed: {{ sdwan_deployment_status.response.message
+      S2S deployment failed: {{ s2s_deployment_status.response.message
       | default('Check FMC deployment details') }}.
-  when: sdwan_deployment_targets | length > 0
+  when: s2s_deployment_targets | length > 0

@@ -1,0 +1,80 @@
+---
+- name: Set route-based role input
+  ansible.builtin.set_fact:
+    route_vpn: "{{ s2s_vpn }}"
+
+- name: Validate route-based topology identity
+  ansible.builtin.assert:
+    that:
+      - route_vpn.name | default('') | length > 0
+      - route_vpn.state | default('present') in ['inspect', 'present', 'absent']
+      - route_vpn.hub.device | default('') | length > 0
+      - route_vpn.spoke.device | default('') | length > 0
+      - route_vpn.hub.device != route_vpn.spoke.device
+      - route_vpn.hub.source_interface | default('') | length > 0
+      - route_vpn.spoke.source_interface | default('') | length > 0
+    fail_msg: >-
+      s2s_vpn needs a unique name, state=inspect|present|absent, and
+      different hub/spoke device names with routed source_interface names.
+
+- name: Validate route-based loopbacks and static VTIs
+  ansible.builtin.assert:
+    that:
+      - route_vpn[route_side].loopback.id | default(-1) | int >= 0
+      - route_vpn[route_side].loopback.ifname | default('') | length > 0
+      - (route_vpn[route_side].loopback.address | default('') | ansible.utils.ipaddr('address')) is string
+      - (route_vpn[route_side].loopback.netmask | default('') | ansible.utils.ipaddr('netmask')) is string
+      - route_vpn[route_side].tunnel.id | default(-1) | int >= 0
+      - route_vpn[route_side].tunnel.ifname | default('') | length > 0
+    fail_msg: >-
+      s2s_vpn.{{ route_side }} needs loopback.id, ifname, address and netmask,
+      plus tunnel.id and ifname for a static borrowed-IP VTI.
+  loop:
+    - hub
+    - spoke
+  loop_control:
+    loop_var: route_side
+
+- name: Validate route-based crypto object names
+  ansible.builtin.assert:
+    that:
+      - route_vpn.crypto.ikev2_policy | default('') | length > 0
+      - route_vpn.crypto.ipsec_proposal | default('') | length > 0
+    fail_msg: >-
+      s2s_vpn.crypto.ikev2_policy and ipsec_proposal must name existing
+      FMC objects for state=present.
+  when: route_vpn.state | default('present') == 'present'
+
+- name: Set route-based resource identity
+  ansible.builtin.set_fact:
+    route_marker: "Managed by FMCAnsible s2s_vpn: {{ route_vpn.name }}"
+    route_zone_name: "{{ route_vpn.name }}-zone"
+
+- name: Discover route-based resources
+  ansible.builtin.include_tasks: route_discover.yml
+
+- name: Check route-based deployment baseline when requested
+  ansible.builtin.include_tasks: check_deploy_baseline.yml
+  vars:
+    s2s_domain_uuid: "{{ route_domain_uuid }}"
+    s2s_hub_device: "{{ route_resolved_hub.device }}"
+    s2s_spoke_device: "{{ route_resolved_spoke.device }}"
+  when: route_vpn.deploy | default(false) | bool
+
+- name: Ensure route-based VPN is present
+  ansible.builtin.include_tasks: route_present.yml
+  when: route_vpn.state | default('present') == 'present'
+
+- name: Ensure route-based VPN is absent
+  ansible.builtin.include_tasks: route_absent.yml
+  when: route_vpn.state | default('present') == 'absent'
+
+- name: Deploy route-based changes when requested
+  ansible.builtin.include_tasks: deploy.yml
+  vars:
+    s2s_domain_uuid: "{{ route_domain_uuid }}"
+    s2s_hub_device: "{{ route_resolved_hub.device }}"
+    s2s_spoke_device: "{{ route_resolved_spoke.device }}"
+  when:
+    - route_vpn.state | default('present') != 'inspect'
+    - route_vpn.deploy | default(false) | bool
