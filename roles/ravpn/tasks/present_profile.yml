@@ -77,7 +77,7 @@
   ansible.builtin.assert:
     that:
       - ra_profile_readback.name == ra_profile_request.name
-      - ra_profile_readback.description == ra_marker
+      - ra_profile_readback.metadata.parentPolicy.id == ra_policy_readback.id
       - ra_profile_readback.authenticationMethod == 'AAA_ONLY'
       - ra_profile_readback.useLocalAsPrimaryAuthServer | bool == (ra_profile_request.authentication == 'local')
       - ra_profile_readback.groupPolicy.id == ra_group_readback.id

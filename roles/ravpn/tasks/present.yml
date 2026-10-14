@@ -289,7 +289,10 @@
       - ra_policy_readback.ikev2Policies | map(attribute='id') | list == [ra_ikev2_matches[0].id]
       - ra_policy_readback.accessInterfaceSettings.interfaceSettings[0].accessInterface.id == ra_zone_matches[0].id
       - ra_policy_readback.accessInterfaceSettings.sslIdCertificate.id == ra_certificate_matches[0].id
-      - ra_policy_readback.groupPolicies | map(attribute='id') | list == [ra_group_readback.id]
+      - >-
+        ra_policy_readback.groupPolicies
+        | rejectattr('name', 'equalto', 'DfltGrpPolicy')
+        | map(attribute='id') | list == [ra_group_readback.id]
       - ra_policy_readback.dapPolicy.id == ra_dap_readback.id
       - ra_policy_readback.anyConnectClientImages[0].anyconnectImage.id == ra_package_matches[0].id
     fail_msg: >-
@@ -309,6 +312,15 @@
     that:
       - ra_address_assignments | length == 1
 
+- name: Read current RAVPN address assignment setting
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnAddressAssignmentSetting
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_address_assignments[0].id }}"
+    register_as: ra_current_address_assignment
+
 - name: Enable internal IPv4 address pool assignment
   cisco.fmcansible.fmc_configuration:
     operation: updateFTDRAVpnAddressAssignmentSetting
@@ -325,7 +337,10 @@
       domainUUID: "{{ ra_domain_uuid }}"
       containerUUID: "{{ ra_policy_readback.id }}"
       objectId: "{{ ra_address_assignments[0].id }}"
-  when: not ra_address_assignments[0].useInternalAddressPoolForIPv4 | default(false) | bool
+  when: >-
+    not ra_current_address_assignment.useInternalAddressPoolForIPv4 | default(false) | bool
+    or ra_current_address_assignment.useAuthorizationServerForIPv4 | default(false) | bool
+    or ra_current_address_assignment.useDHCP | default(false) | bool
 
 - name: Read RAVPN address assignment setting
   cisco.fmcansible.fmc_configuration:
@@ -356,6 +371,7 @@
     that:
       - >-
         ra_profile_summaries
+        | rejectattr('name', 'equalto', ra_default_profile_name)
         | rejectattr('name', 'in', ra_resolved_profiles | map(attribute='name') | list)
         | list | length == 0
     fail_msg: >-
@@ -380,7 +396,10 @@
 - name: Require exactly the requested RAVPN profiles
   ansible.builtin.assert:
     that:
-      - ra_profile_final | length == ra_resolved_profiles | length
       - >-
-        ra_profile_final | map(attribute='name') | sort
+        ra_profile_final | rejectattr('name', 'equalto', ra_default_profile_name)
+        | list | length == ra_resolved_profiles | length
+      - >-
+        ra_profile_final | rejectattr('name', 'equalto', ra_default_profile_name)
+        | map(attribute='name') | sort
         == ra_resolved_profiles | map(attribute='name') | sort

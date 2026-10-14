@@ -171,8 +171,8 @@
 - name: Verify owned RAVPN resources were removed
   ansible.builtin.assert:
     that:
-      - ra_policies_after_removal | selectattr('name', 'equalto', ravpn.name) | list | length == 0
-      - ra_groups_after_removal | selectattr('name', 'equalto', ra_group_name) | list | length == 0
-      - ra_pools_after_removal | selectattr('name', 'equalto', ra_pool_name) | list | length == 0
-      - ra_daps_after_removal | selectattr('name', 'equalto', ra_dap_name) | list | length == 0
+      - ra_policies_after_removal | default([]) | selectattr('name', 'equalto', ravpn.name) | list | length == 0
+      - ra_groups_after_removal | default([]) | selectattr('name', 'equalto', ra_group_name) | list | length == 0
+      - ra_pools_after_removal | default([]) | selectattr('name', 'equalto', ra_pool_name) | list | length == 0
+      - ra_daps_after_removal | default([]) | selectattr('name', 'equalto', ra_dap_name) | list | length == 0
     fail_msg: One or more owned RAVPN resources remain after deletion.

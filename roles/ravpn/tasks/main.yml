@@ -37,6 +37,7 @@
     ra_pool_name: "{{ ravpn.name }}-pool"
     ra_group_name: "{{ ravpn.name }}-gp"
     ra_dap_name: "{{ ravpn.name }}-dap"
+    ra_default_profile_name: DefaultWEBVPNGroup
 
 - name: Discover RAVPN resources and prerequisites
   ansible.builtin.include_tasks: discover.yml

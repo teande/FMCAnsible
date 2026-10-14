@@ -191,13 +191,27 @@
   ansible.builtin.assert:
     that:
       - >-
-        ra_existing_profile_full.results | default([])
-        | map(attribute='response')
-        | rejectattr('description', 'equalto', ra_marker)
-        | list | length == 0
+        ra_profile_full.response.metadata.parentPolicy.id | default('')
+        == ra_existing_policy.id
+      - >-
+        (ra_profile_full.response.name == ra_default_profile_name and
+         ra_profile_full.response.groupPolicy.name | default('') == 'DfltGrpPolicy')
+        or
+        (ra_profile_full.response.name.startswith(ravpn.name ~ '-') and
+         ra_group_matches | length == 1 and
+         ra_pool_matches | length == 1 and
+         ra_profile_full.response.groupPolicy.id | default('') == ra_existing_group.id and
+         (ra_profile_full.response.ipv4AddressPool | default([])
+          | map(attribute='id') | list) == [ra_existing_pool.id])
     fail_msg: >-
-      {{ ravpn.name }} contains a connection profile not owned by this role.
-      Nothing was changed; inspect FMC before retrying.
+      {{ ravpn.name }} contains a connection profile whose parent or
+      role-owned references do not match. Nothing was changed; inspect FMC
+      before retrying.
+  loop: "{{ ra_existing_profile_full.results | default([]) }}"
+  loop_control:
+    loop_var: ra_profile_full
+    label: "{{ ra_profile_full.response.name }}"
+  no_log: true
   when: ra_policy_matches | length == 1
 
 - name: Get RAVPN access zones
@@ -278,6 +292,7 @@
     that:
       - >-
         ra_existing_profiles | default([])
+        | rejectattr('name', 'equalto', ra_default_profile_name)
         | rejectattr('name', 'in', ra_resolved_profiles | map(attribute='name') | list)
         | list | length == 0
     fail_msg: >-

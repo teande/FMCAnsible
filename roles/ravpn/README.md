@@ -3,7 +3,10 @@
 `cisco.fmcansible.ravpn` configures one remote-access VPN policy and its IPv4
 pool, group policy, default dynamic access policy, and connection profiles.
 It reads each created object back and checks key fields. `state: absent`
-removes only resources bearing the role's ownership marker. `state: inspect`
+removes only resources bearing the role's ownership marker. FMC omits connection
+profile descriptions on GET, so the role also requires their exact parent
+policy, role-name prefix, group policy, and address-pool references before
+removing them. `state: inspect`
 discovers the target and prerequisites without changing FMC.
 
 FTD 7.3 or later is required. The target must be connected and managed. The

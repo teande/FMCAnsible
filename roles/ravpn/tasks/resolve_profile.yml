@@ -16,15 +16,29 @@
       {{ ra_realms
          | selectattr('name', 'equalto', ra_input_profile.realm) | list }}
 
-- name: Require matching identity realm for profile {{ ra_input_profile.name }}
+- name: Require one identity realm for profile {{ ra_input_profile.name }}
   ansible.builtin.assert:
     that:
       - ra_realm_matches | length == 1
-      - >-
-        ra_realm_matches[0].realmType
-        == ('AD' if ra_input_profile.authentication == 'ad' else 'LOCAL')
     fail_msg: >-
-      Profile {{ ra_input_profile.name }} needs exactly one existing
+      Profile {{ ra_input_profile.name }} needs exactly one existing realm
+      named {{ ra_input_profile.realm }}.
+
+- name: Read realm for profile {{ ra_input_profile.name }}
+  cisco.fmcansible.fmc_configuration:
+    operation: getRealm
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      objectId: "{{ ra_realm_matches[0].id }}"
+    register_as: ra_realm
+  no_log: true
+
+- name: Require matching realm type for profile {{ ra_input_profile.name }}
+  ansible.builtin.assert:
+    that:
+      - ra_realm.realmType == ('AD' if ra_input_profile.authentication == 'ad' else 'LOCAL')
+    fail_msg: >-
+      Profile {{ ra_input_profile.name }} needs a
       {{ 'AD' if ra_input_profile.authentication == 'ad' else 'LOCAL' }}
       realm named {{ ra_input_profile.realm }}.
 
@@ -35,5 +49,8 @@
            'name': ravpn.name ~ '-' ~ ra_input_profile.name,
            'alias': ra_input_profile.alias | default(ra_input_profile.name),
            'authentication': ra_input_profile.authentication,
-           'realm': ra_realm_matches[0]
+           'realm': {
+             'name': ra_realm.name,
+             'id': ra_realm.id,
+             'type': ra_realm.type}
          }] }}
