@@ -13,6 +13,12 @@ FTD 7.3 or later is required. The target must be connected and managed. The
 role uses existing security zone, Secure Client image, IKEv2 policy, certificate
 enrollment, and AD or local realms. It does not create an AD connection,
 certificate, package, or local user. Configure and validate these separately.
+For AD profiles, cdFMC requires an LDAP attribute map in the RAVPN policy
+before deployment. Map the intended AD group or attribute to an appropriate
+group policy. The role does not create or infer authorization mappings, so a
+one-shot `deploy: true` run with AD authorization is not yet supported. Stage
+with `deploy: false`, configure the map, then deploy the reviewed changes
+separately. Subsequent `deploy: true` runs require a clean target baseline.
 The RAVPN policy uses the existing IKEv2 policy's algorithms; select one that
 meets your organization's security requirements.
 

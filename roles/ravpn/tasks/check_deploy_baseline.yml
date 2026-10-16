@@ -37,7 +37,14 @@
   ansible.builtin.assert:
     that:
       - ra_target_licenses | length == 1
-      - "'SECURE_CLIENT_VPNOnly' in ra_target_licenses[0].licenseTypes | default([])"
+      - >-
+        ra_target_licenses[0].licenseTypes | default([])
+        | intersect([
+            'SECURE_CLIENT_VPNOnly', 'SECURE_CLIENT_VPNOnly_HA',
+            'SECURE_CLIENT_PREMIER', 'SECURE_CLIENT_PREMIER_HA',
+            'SECURE_CLIENT_PREMIER_ADVANTAGE',
+            'SECURE_CLIENT_PREMIER_ADVANTAGE_HA'
+          ]) | length > 0
     fail_msg: >-
       {{ ra_device.name }} needs a Secure Client VPN license before RAVPN
       configuration and deployment.
