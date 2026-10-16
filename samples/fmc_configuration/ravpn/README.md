@@ -20,7 +20,10 @@ ansible-playbook -i samples/fmc_configuration/ravpn/inventory.example.yml \
 
 The address pool, group policy, DAP, policy, and profiles are owned by the role.
 The security zone, Secure Client package, IKEv2 policy, certificate, and AD or
-local realm must already exist. Run `state: present` with `deploy: false` to
-inspect created configuration, then use `deploy: true` after confirming the
-target's deployment baseline. Run `state: absent` to remove role-owned
-resources. See [role inputs](../../../roles/ravpn/README.md) for restrictions.
+local realm must already exist. AD profiles must specify the LDAP value used
+for group-policy authorization. Use `state: inspect` to review prerequisites;
+from a clean deployment baseline, use `state: present` with `deploy: true` to
+configure and deploy in one run. `deploy: false` leaves pending changes that
+must be reviewed and deployed separately before a later `deploy: true` run.
+Run `state: absent` to remove role-owned resources. See
+[role inputs](../../../roles/ravpn/README.md) for restrictions.

@@ -1,0 +1,78 @@
+---
+- name: Get RAVPN LDAP attribute map containers
+  cisco.fmcansible.fmc_configuration:
+    operation: getAllFTDRAVpnLDAPAttributeModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+    register_as: ra_ldap_map_summaries
+
+- name: Require one LDAP attribute map container in the owned policy
+  ansible.builtin.assert:
+    that:
+      - ra_ldap_map_summaries | length == 1
+    fail_msg: >-
+      {{ ravpn.name }} must have exactly one LDAP attribute map container.
+
+- name: Read RAVPN LDAP attribute map
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnLDAPAttributeModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_ldap_map_summaries[0].id }}"
+    register_as: ra_ldap_map
+
+- name: Require LDAP map belongs to the owned policy
+  ansible.builtin.assert:
+    that:
+      - ra_ldap_map.metadata.parentPolicy.id == ra_policy_readback.id
+
+- name: Initialize requested LDAP attribute maps
+  ansible.builtin.set_fact:
+    ra_ldap_desired_maps: []
+
+- name: Build one LDAP authorization map per AD realm
+  ansible.builtin.include_tasks: build_ldap_realm_map.yml
+  loop: "{{ ra_ad_profiles | map(attribute='realm.id') | unique | sort | list }}"
+  loop_control:
+    loop_var: ra_realm_id
+
+- name: Refuse existing LDAP authorization outside the requested map
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_ldap_map.ldapAttributeMapList | default([]) | length == 0
+        or ra_ldap_map.ldapAttributeMapList == ra_ldap_desired_maps
+    fail_msg: >-
+      {{ ravpn.name }} has an LDAP attribute map that differs from the
+      requested AD authorization. Review it before changing this policy.
+
+- name: Configure requested AD authorization map
+  cisco.fmcansible.fmc_configuration:
+    operation: updateFTDRAVpnLDAPAttributeModel
+    data:
+      id: "{{ ra_ldap_map.id }}"
+      type: RaVpnLdapAttributeMap
+      ldapAttributeMapList: "{{ ra_ldap_desired_maps }}"
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_ldap_map.id }}"
+  when: ra_ldap_map.ldapAttributeMapList | default([]) | length == 0
+
+- name: Read RAVPN LDAP attribute map after convergence
+  cisco.fmcansible.fmc_configuration:
+    operation: getFTDRAVpnLDAPAttributeModel
+    path_params:
+      domainUUID: "{{ ra_domain_uuid }}"
+      containerUUID: "{{ ra_policy_readback.id }}"
+      objectId: "{{ ra_ldap_map.id }}"
+    register_as: ra_ldap_map_readback
+
+- name: Verify requested AD authorization map
+  ansible.builtin.assert:
+    that:
+      - ra_ldap_map_readback.ldapAttributeMapList == ra_ldap_desired_maps
+    fail_msg: >-
+      {{ ravpn.name }} did not retain the requested LDAP authorization map.

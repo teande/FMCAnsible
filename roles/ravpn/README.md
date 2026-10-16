@@ -13,12 +13,13 @@ FTD 7.3 or later is required. The target must be connected and managed. The
 role uses existing security zone, Secure Client image, IKEv2 policy, certificate
 enrollment, and AD or local realms. It does not create an AD connection,
 certificate, package, or local user. Configure and validate these separately.
-For AD profiles, cdFMC requires an LDAP attribute map in the RAVPN policy
-before deployment. Map the intended AD group or attribute to an appropriate
-group policy. The role does not create or infer authorization mappings, so a
-one-shot `deploy: true` run with AD authorization is not yet supported. Stage
-with `deploy: false`, configure the map, then deploy the reviewed changes
-separately. Subsequent `deploy: true` runs require a clean target baseline.
+For AD profiles, set `authorization.ldap_value` to the exact AD attribute value
+that should select the role-owned group policy. The LDAP attribute defaults to
+`memberOf`; set `authorization.ldap_attribute` if a different attribute is
+needed. The role creates the policy's LDAP attribute map before deployment and
+does not infer an allowed group from the realm. Profiles sharing an AD realm
+must use the same LDAP attribute. An existing nonempty map that differs from
+the request is refused rather than overwritten.
 The RAVPN policy uses the existing IKEv2 policy's algorithms; select one that
 meets your organization's security requirements.
 
@@ -41,7 +42,7 @@ assigns the policy to `target_device` and deploys that FTD. Use
 | `group_policy.simultaneous_logins` | No | Default `2`. |
 | `group_policy.vpn_idle_timeout` | No | Minutes; default `30`. |
 | `group_policy.mtu` | No | Default `1406`. |
-| `profiles` | Yes | One or more unique names, `authentication: ad` or `local`, exact existing realm name, optional alias. |
+| `profiles` | Yes | One or more unique names, `authentication: ad` or `local`, exact existing realm name, optional alias. AD profiles also require `authorization.ldap_value`; `authorization.ldap_attribute` defaults to `memberOf`. |
 
 Only full-tunnel IPv4 address assignment is currently supported. Split-tunnel
 network lists, DHCP assignment, SAML, secondary authentication, and custom DAP
@@ -53,5 +54,8 @@ avoid silently creating a configuration that the role cannot verify.
 before writing, and refuses an FTD with unrelated pending changes. No
 `ignoreWarning` or `forceDeploy` override is exposed. This role verifies FMC
 configuration and deployment state, not client sign-in or dataplane traffic.
+If `deploy: false` creates pending changes, deploy or discard those separately
+before a later `deploy: true` run; the clean-baseline guard does not assume the
+pending changes belong to this role.
 
 See [the runnable example](../../samples/fmc_configuration/ravpn/README.md).

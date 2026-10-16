@@ -1,0 +1,49 @@
+---
+- name: Select AD profiles for realm {{ ra_realm_id }}
+  ansible.builtin.set_fact:
+    ra_realm_profiles: >-
+      {{ ra_ad_profiles | selectattr('realm.id', 'equalto', ra_realm_id) | list }}
+
+- name: Require one LDAP attribute per AD realm
+  ansible.builtin.assert:
+    that:
+      - >-
+        ra_realm_profiles
+        | map(attribute='authorization.ldap_attribute') | unique | list | length == 1
+    fail_msg: >-
+      AD profiles sharing realm {{ ra_realm_profiles[0].realm.name }} must use
+      the same authorization.ldap_attribute.
+
+- name: Select authorized LDAP values for realm {{ ra_realm_id }}
+  ansible.builtin.set_fact:
+    ra_ldap_values: >-
+      {{ ra_realm_profiles
+         | map(attribute='authorization.ldap_value') | unique | sort | list }}
+    ra_ldap_value_mappings: []
+
+- name: Map authorized LDAP values to the role-owned group policy
+  ansible.builtin.set_fact:
+    ra_ldap_value_mappings: >-
+      {{ ra_ldap_value_mappings + [{
+           'ldapValue': ra_ldap_value,
+           'valueType': 'LdapToGroupPolicyMapping',
+           'groupPolicy': {
+             'name': ra_group_readback.name,
+             'id': ra_group_readback.id,
+             'type': ra_group_readback.type}
+         }] }}
+  loop: "{{ ra_ldap_values }}"
+  loop_control:
+    loop_var: ra_ldap_value
+
+- name: Add authorization map for realm {{ ra_realm_id }}
+  ansible.builtin.set_fact:
+    ra_ldap_desired_maps: >-
+      {{ ra_ldap_desired_maps + [{
+           'ldapServer': ra_realm_profiles[0].realm,
+           'ldapAttributeMaps': [{
+             'ldapName': ra_realm_profiles[0].authorization.ldap_attribute,
+             'ciscoName': 'Group-Policy',
+             'valueMappings': ra_ldap_value_mappings
+           }]
+         }] }}

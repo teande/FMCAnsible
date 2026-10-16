@@ -10,6 +10,19 @@
       Each ravpn.profiles item needs name, authentication=ad|local, realm,
       and optionally alias.
 
+- name: Validate AD authorization for profile {{ ra_input_profile.name }}
+  ansible.builtin.assert:
+    that:
+      - ra_input_profile.authorization | default({}) is mapping
+      - ra_input_profile.authorization.ldap_attribute | default('memberOf') is string
+      - ra_input_profile.authorization.ldap_attribute | default('memberOf') | trim | length > 0
+      - ra_input_profile.authorization.ldap_value | default('') is string
+      - ra_input_profile.authorization.ldap_value | default('') | trim | length > 0
+    fail_msg: >-
+      AD profile {{ ra_input_profile.name }} needs authorization.ldap_value
+      and optionally authorization.ldap_attribute (default memberOf).
+  when: ra_input_profile.authentication == 'ad'
+
 - name: Select realm for profile {{ ra_input_profile.name }}
   ansible.builtin.set_fact:
     ra_realm_matches: >-
@@ -53,4 +66,10 @@
              'name': ra_realm.name,
              'id': ra_realm.id,
              'type': ra_realm.type}
-         }] }}
+         } | combine(
+           {'authorization': {
+              'ldap_attribute': ra_input_profile.authorization.ldap_attribute
+                | default('memberOf') | trim,
+              'ldap_value': ra_input_profile.authorization.ldap_value | trim}}
+           if ra_input_profile.authentication == 'ad' else {}
+         )] }}

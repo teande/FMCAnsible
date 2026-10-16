@@ -196,6 +196,9 @@
     ra_local_profiles: >-
       {{ ra_resolved_profiles
          | selectattr('authentication', 'equalto', 'local') | list }}
+    ra_ad_profiles: >-
+      {{ ra_resolved_profiles
+         | selectattr('authentication', 'equalto', 'ad') | list }}
 
 - name: Create RAVPN policy
   cisco.fmcansible.fmc_configuration:
@@ -403,3 +406,7 @@
         ra_profile_final | rejectattr('name', 'equalto', ra_default_profile_name)
         | map(attribute='name') | sort
         == ra_resolved_profiles | map(attribute='name') | sort
+
+- name: Ensure AD authorization map
+  ansible.builtin.include_tasks: present_ldap_map.yml
+  when: ra_ad_profiles | length > 0

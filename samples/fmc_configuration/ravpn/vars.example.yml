@@ -24,6 +24,8 @@ ravpn:
       authentication: ad
       realm: example-ad-realm
       alias: corporate
+      authorization:
+        ldap_value: CN=Example-VPN-Users,OU=Groups,DC=example,DC=invalid
     - name: local
       authentication: local
       realm: example-local-realm
